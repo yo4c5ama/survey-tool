@@ -1,0 +1,31 @@
+# Manual and reviewer-provided seed papers for snowballing.
+#
+# Each item may provide a title, DOI, OpenAlex id, and notes. DOI/OpenAlex id
+# are preferred for exact resolution; title-only seeds are resolved by title
+# search with a conservative similarity check.
+
+seed_papers:
+  - title: Robustness Verification for Transformers
+    doi: 10.48550/arxiv.2002.06622
+    source: core_seed
+    notes: Zhouxing Shi et al.; use forward citations to recover reviewer-related papers.
+
+  - title: "NLP Verification: Towards a General Methodology for Certifying Robustness"
+    doi: 10.1017/S0956792525000099
+    source: reviewer
+    notes: Explicit reviewer suggestion; methodology paper for NLP robustness certification.
+
+  - title: Provable Repair of Vision Transformers
+    doi: 10.1007/978-3-031-65112-0_8
+    source: advisor
+    notes: Transformer/ViT provable repair seed.
+
+  - title: "Towards Formal XAI: Formally Approximate Minimal Explanations of Neural Networks"
+    doi: 10.1007/978-3-031-30823-9_10
+    source: advisor
+    notes: Guy Katz formal XAI seed; useful for related verification-derived techniques.
+
+  - title: "Formal Mechanistic Interpretability: Automated Circuit Discovery with Provable Guarantees"
+    doi: 10.48550/arxiv.2602.16823
+    source: advisor
+    notes: Guy Katz/Shahaf Bassan formal mechanistic interpretability seed.

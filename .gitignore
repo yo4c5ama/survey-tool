@@ -1,0 +1,49 @@
+# Secrets and local environment files
+.secrets/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Python environments and caches
+.venv/
+venv/
+.surveyflow-tools/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build and release artifacts
+build/
+dist/
+
+# SurveyFlow runtime data
+data/app_projects/
+data/cache/
+data/raw/
+data/processed/
+data/runs/
+data/exports/
+
+# Downloaded reference papers are not application source
+ref/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

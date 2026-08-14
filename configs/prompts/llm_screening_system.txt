@@ -1,0 +1,45 @@
+You are screening papers for a survey on Transformer verification.
+
+Screen based only on the provided title, abstract, and metadata. Do not invent
+facts not supported by the title or abstract.
+
+Survey scope:
+- Include formal verification, certification, certified robustness, reachability
+  analysis, abstract interpretation, bound propagation, linear relaxation,
+  SMT/MILP-based verification, or comparable rigorous analysis of Transformers,
+  Vision Transformers, attention-based neural networks, or LLMs themselves.
+- Include downstream techniques derived from verification when the verified or
+  guaranteed target is a Transformer, Vision Transformer, attention model, LLM,
+  or LLM output. This includes provable repair, provable model editing, formal
+  XAI, formal/provable explanations, mechanistic interpretability with formal
+  guarantees, and circuit discovery with certified robustness/minimality/patching
+  guarantees.
+- Include work that verifies/certifies LLM behavior, outputs, ownership,
+  watermarking, robustness, safety, misalignment, domain certification, or
+  reasoning, when the LLM itself or its output is the verification target.
+- Exclude work where LLMs, Transformers, BERT, or attention networks are merely
+  tools/features/classifiers used to verify another artifact or solve another
+  task, such as software, hardware, code, protocols, smart contracts, documents,
+  claims, facts, speakers, signatures, identity, or electrical transformers.
+- Exclude generic neural-network verification papers unless the title or abstract
+  clearly targets Transformers, attention models, ViTs, LLMs, or directly
+  supports a methodology paper required for NLP/Transformer verification.
+
+Scope labels:
+- Use "transformer_verification" for Transformer/ViT/attention verification,
+  certification, provable repair, or formal explainability.
+- Use "llm_target_verification" for formal verification/certification/repair or
+  formal explainability of LLMs or LLM outputs.
+- Use "llm_as_tool" when an LLM is only a tool for verifying another artifact.
+- Use "unrelated" for fact checking, speaker verification, document verification,
+  software/hardware verification, or other tasks where the model is not the
+  verification target.
+- Use "insufficient_information" when the title/abstract do not support a stable
+  scope judgment.
+
+Decision policy:
+- Use "include" only when the paper is clearly in scope.
+- Use "exclude" when it is clearly out of scope.
+- Use "maybe" when title/abstract are ambiguous or the abstract is missing.
+
+Return concise evidence copied or paraphrased from the title/abstract.

@@ -1,0 +1,237 @@
+# User-editable survey inputs.
+#
+# In most cases, this is the only config file you need to edit.
+# Keep one keyword or phrase per line. The query compiler uses:
+# - OR within each keyword group
+# - AND across groups inside each logical_groups block
+#
+# Example:
+#   model: [transformer, BERT, ViT]
+#   activity: [verification, certification]
+# means:
+#   (transformer OR BERT OR ViT) AND (verification OR certification)
+
+years:
+  start: 2017
+  end: 2026
+
+query:
+  # Query generation strategy:
+  # - grouped: recommended; use logical_groups below.
+  # - logical: use raw DBLP-style strings in logical_queries.
+  # - cartesian: generate every model_terms x verification_terms pair.
+  # - all: combine grouped, logical, and cartesian queries.
+  strategy: grouped
+
+  # Reusable keyword sets. Add/remove terms here first.
+  term_sets:
+    short_transformer_models:
+      - transformer
+      - BERT
+      - ViT
+
+    transformer_attention_models:
+      - transformer
+      - attention
+
+    transformer_family_extended:
+      - transformer
+      - BERT
+      - ViT
+      - vision transformer
+      - language model
+      - large language model
+      - LLM
+
+    core_activity:
+      - verification
+      - certification
+      - reachability
+
+    robustness_activity:
+      - certified robustness
+      - robustness certificate
+
+    formal_methods:
+      - SMT
+      - MILP
+      - abstract interpretation
+      - bound propagation
+      - linear relaxation
+
+    core_plus_certified_robustness:
+      - verification
+      - certification
+      - reachability
+      - certified robustness
+
+    verification_certification:
+      - verification
+      - certification
+
+    language_model_properties:
+      - safety verification
+      - ownership verification
+      - watermark verification
+
+    repair_activity:
+      - provable repair
+      - neural network repair
+      - model repair
+      - network repair
+      - provable editing
+      - model editing
+
+    formal_explainability_activity:
+      - formal XAI
+      - formal explainability
+      - formal interpretability
+      - provable explanation
+      - provably correct explanation
+      - minimal explanation
+      - mechanistic interpretability
+      - circuit discovery
+      - robust patching
+
+    nlp_verification_methodology:
+      - certifying robustness
+      - embedding gap
+      - semantic similarity
+      - verification methodology
+
+  # Used only by strategy: cartesian/all.
+  model_terms:
+    - transformer
+    - self attention
+    - attention
+    - BERT
+    - language model
+    - large language model
+    - LLM
+    - vision transformer
+    - ViT
+    - encoder decoder
+
+  # Used only by strategy: cartesian/all.
+  verification_terms:
+    - verification
+    - formal verification
+    - certification
+    - certified robustness
+    - robustness certificate
+    - reachability
+    - abstract interpretation
+    - bound propagation
+    - linear relaxation
+    - SMT
+    - MILP
+    - provable repair
+    - formal XAI
+    - formal interpretability
+    - provable explanation
+    - mechanistic interpretability
+
+  # Structured search blocks.
+  # Each block means:
+  #   (any term in group A) AND (any term in group B) [AND ...]
+  logical_groups:
+    - name: core_short_model_activity
+      groups:
+        model: short_transformer_models
+        activity: core_activity
+
+    - name: core_short_model_robustness
+      groups:
+        model: short_transformer_models
+        activity: robustness_activity
+
+    - name: attention_formal_methods
+      groups:
+        model: transformer_attention_models
+        method: formal_methods
+
+    - name: self_attention_activity
+      groups:
+        model:
+          - self attention
+        activity: core_activity
+
+    - name: vision_transformer_activity
+      groups:
+        model:
+          - vision transformer
+        activity: core_plus_certified_robustness
+
+    - name: attention_network_activity
+      groups:
+        model:
+          - attention network
+        activity: verification_certification
+
+    - name: llm_short_activity
+      groups:
+        model:
+          - LLM
+        activity: core_plus_certified_robustness
+
+    - name: large_language_model_activity
+      groups:
+        model:
+          - large language model
+        activity: core_plus_certified_robustness
+
+    - name: language_model_specific_properties
+      groups:
+        model:
+          - language model
+        property: language_model_properties
+
+    - name: transformer_repair
+      groups:
+        model: transformer_family_extended
+        activity: repair_activity
+
+    - name: transformer_formal_explainability
+      groups:
+        model: transformer_family_extended
+        activity: formal_explainability_activity
+
+    - name: nlp_verification_methodology
+      groups:
+        area:
+          - NLP
+          - natural language processing
+        activity: nlp_verification_methodology
+
+  # Optional extra DBLP-style query strings for special cases.
+  extra_queries:
+    - neural network verification transformer
+    - verifying transformers
+    - certified robustness transformers
+    - robustness certification transformers
+    - verification self-attention
+    - verification attention networks
+    - Provable Repair of Vision Transformers
+    - PRoViT vision transformers repair
+    - transformer provable repair
+    - vision transformer provable repair
+    - NLP Verification Towards General Methodology Certifying Robustness
+    - embedding gap NLP verification
+    - Formal Mechanistic Interpretability Automated Circuit Discovery Provable Guarantees
+    - Towards Formal XAI Formally Approximate Minimal Explanations
+    - transformer formal interpretability
+    - transformer provable explanation
+    - transformer circuit discovery provable guarantees
+
+filters:
+  # Keep arXiv/CoRR in the raw collection by default.
+  include_corr: true
+  include_informal: true
+
+screening:
+  # Include verification/certification/robustness of Transformers, ViTs, LLMs,
+  # and attention-based neural models when the model itself is the verification target.
+  #
+  # Exclude papers where LLMs are only used as tools to verify software,
+  # hardware, smart contracts, proofs, assertions, or other non-LLM artifacts.
+  exclude_llm_as_verification_tool: true

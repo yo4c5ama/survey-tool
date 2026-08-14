@@ -1,0 +1,13 @@
+.git
+.venv
+.surveyflow-tools
+.secrets
+.ruff_cache
+dist
+data/app_projects
+data/cache
+data/processed
+data/raw
+data/runs
+**/__pycache__
+**/*.pyc

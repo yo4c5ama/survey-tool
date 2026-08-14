@@ -1,0 +1,7 @@
+title: {title}
+year: {year}
+venue: {venue}
+doi: {doi}
+auto_screening_decision: {auto_screening_decision}
+auto_screening_bucket: {auto_screening_bucket}
+abstract: {abstract}

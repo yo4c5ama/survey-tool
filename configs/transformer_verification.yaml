@@ -1,0 +1,73 @@
+# Technical pipeline settings.
+#
+# Edit survey scope, years, keywords, and search logic in:
+#
+#   configs/survey_inputs.yaml
+#
+# This file keeps provider/rate-limit/cache/API settings in one place.
+user_config: survey_inputs.yaml
+
+dblp:
+  cache_dir: data/cache/dblp
+  hits_per_page: 100
+  max_pages_per_query: 10
+  request_delay_seconds: 1.0
+  timeout_seconds: 30
+  retries: 3
+
+enrichment:
+  # OpenAlex is the default because it currently works reliably without an API key.
+  # Add semantic_scholar after setting SEMANTIC_SCHOLAR_API_KEY if you want S2 fallback.
+  providers:
+    - openalex
+  cache_dir: data/cache/abstracts
+  request_delay_seconds: 0.2
+  timeout_seconds: 30
+  retries: 3
+  min_title_similarity: 0.86
+  semantic_scholar_api_key_env: SEMANTIC_SCHOLAR_API_KEY
+  openalex_api_key_env: OPENALEX_API_KEY
+  openalex_email_env: OPENALEX_EMAIL
+
+venue_quality:
+  # CORE conference ranks are queried from the official portal when enabled,
+  # then cached locally. The CSV files below can be used for manual overrides
+  # or for journal Impact Factor values.
+  core_rankings_path: data/venue_quality/core_rankings.csv
+  journal_impact_factors_path: data/venue_quality/journal_impact_factors.csv
+  core_online_enabled: true
+  core_cache_dir: data/cache/core_rankings
+  core_request_delay_seconds: 0.5
+  core_timeout_seconds: 30
+
+snowballing:
+  # Manual/reviewer seed papers are listed here. The snowballing stage resolves
+  # them through OpenAlex, adds the seeds to the candidate pool, and collects
+  # backward references plus forward citations.
+  seed_papers_path: configs/seed_papers.yaml
+  cache_dir: data/cache/openalex_snowballing
+  request_delay_seconds: 0.2
+  timeout_seconds: 30
+  retries: 3
+  max_backward_per_seed: 30
+  max_forward_per_seed: 30
+  include_seed_papers: true
+  openalex_api_key_env: OPENALEX_API_KEY
+  openalex_email_env: OPENALEX_EMAIL
+
+llm_screening:
+  model: gpt-5.4-mini-2026-03-17
+  api_key_env: OPENAI_API_KEY
+  api_key_file: .secrets/openai_api_key
+  base_url: https://api.openai.com/v1
+  cache_dir: data/cache/openai_llm_screening
+  request_delay_seconds: 0.2
+  timeout_seconds: 60
+  retries: 3
+  max_output_tokens: 800
+  prompt_version: transformer-verification-screen-v2-downstream
+  system_prompt_path: configs/prompts/llm_screening_system.txt
+  user_prompt_template_path: configs/prompts/llm_screening_user.txt
+  include_decisions:
+    - include_candidate
+    - needs_review

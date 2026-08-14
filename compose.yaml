@@ -1,0 +1,9 @@
+services:
+  surveyflow:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data/app_projects:/app/data/app_projects
+      - ./.secrets/app_projects:/app/.secrets/app_projects
+    restart: unless-stopped
