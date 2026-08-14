@@ -33,6 +33,23 @@ class DblpConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveryConfig:
+    sources: list[str] = field(default_factory=lambda: ["dblp"])
+    cache_dir: Path | None = None
+    results_per_page: int = 100
+    max_pages_per_query: int = 2
+    request_delay_seconds: float = 0.25
+    arxiv_request_delay_seconds: float = 3.0
+    timeout_seconds: int = 30
+    retries: int = 3
+    crossref_email_env: str = "CROSSREF_EMAIL"
+    openalex_api_key_env: str = "OPENALEX_API_KEY"
+    openalex_email_env: str = "OPENALEX_EMAIL"
+    pubmed_api_key_env: str = "NCBI_API_KEY"
+    pubmed_email_env: str = "NCBI_EMAIL"
+
+
+@dataclass(frozen=True, slots=True)
 class FilterConfig:
     include_corr: bool = True
     include_informal: bool = True
@@ -118,6 +135,7 @@ class SurveyConfig:
     logical_queries: list[str]
     extra_queries: list[str]
     dblp: DblpConfig
+    discovery: DiscoveryConfig
     filters: FilterConfig
     screening: ScreeningConfig
     enrichment: EnrichmentConfig
@@ -181,6 +199,7 @@ def load_config(path: Path) -> SurveyConfig:
     query = raw.get("query", {})
     years = raw.get("years", {})
     dblp = raw.get("dblp", {})
+    discovery = raw.get("discovery", {})
     filters = raw.get("filters", {})
     screening = raw.get("screening", {})
     enrichment = raw.get("enrichment", {})
@@ -208,6 +227,33 @@ def load_config(path: Path) -> SurveyConfig:
             request_delay_seconds=float(dblp.get("request_delay_seconds", 1.0)),
             timeout_seconds=int(dblp.get("timeout_seconds", 30)),
             retries=int(dblp.get("retries", 3)),
+        ),
+        discovery=DiscoveryConfig(
+            sources=[str(item) for item in discovery.get("sources", ["dblp"])],
+            cache_dir=Path(discovery["cache_dir"])
+            if discovery.get("cache_dir")
+            else None,
+            results_per_page=int(discovery.get("results_per_page", 100)),
+            max_pages_per_query=int(discovery.get("max_pages_per_query", 2)),
+            request_delay_seconds=float(discovery.get("request_delay_seconds", 0.25)),
+            arxiv_request_delay_seconds=float(
+                discovery.get("arxiv_request_delay_seconds", 3.0)
+            ),
+            timeout_seconds=int(discovery.get("timeout_seconds", 30)),
+            retries=int(discovery.get("retries", 3)),
+            crossref_email_env=str(
+                discovery.get("crossref_email_env", "CROSSREF_EMAIL")
+            ),
+            openalex_api_key_env=str(
+                discovery.get("openalex_api_key_env", "OPENALEX_API_KEY")
+            ),
+            openalex_email_env=str(
+                discovery.get("openalex_email_env", "OPENALEX_EMAIL")
+            ),
+            pubmed_api_key_env=str(
+                discovery.get("pubmed_api_key_env", "NCBI_API_KEY")
+            ),
+            pubmed_email_env=str(discovery.get("pubmed_email_env", "NCBI_EMAIL")),
         ),
         filters=FilterConfig(
             include_corr=bool(filters.get("include_corr", True)),
@@ -397,6 +443,13 @@ def dedupe_preserving_order(values: list[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(value)
     return deduped
+
+
+def expand_query_alternatives(query: str) -> list[str]:
+    """Expand DBLP pipe alternatives for providers without DBLP query syntax."""
+    parts = query.split()
+    choices = [part.split("|") if "|" in part else [part] for part in parts]
+    return [" ".join(values) for values in product(*choices)] if choices else []
 
 
 def _load_config_dict(path: Path) -> dict[str, Any]:

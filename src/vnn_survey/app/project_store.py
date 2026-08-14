@@ -38,12 +38,16 @@ class ProjectSettings:
     year_start: int
     year_end: int
     keyword_groups: list[KeywordGroup]
+    research_domain: str = "computer_science"
+    discovery_sources: list[str] = field(default_factory=lambda: ["dblp"])
     inclusion_criteria: list[str] = field(default_factory=list)
     exclusion_criteria: list[str] = field(default_factory=list)
     title_exclude_terms: list[str] = field(default_factory=list)
     include_arxiv: bool = True
     include_informal: bool = True
     llm_model: str = "gpt-5.4-mini"
+    paper_qa_model: str = "gpt-5.4"
+    corpus_analysis_model: str = "gpt-5.4"
     llm_base_url: str = "https://api.openai.com/v1"
     created_at: str = ""
     updated_at: str = ""
@@ -63,12 +67,25 @@ class ProjectSettings:
                 for item in value.get("keyword_groups", [])
                 if isinstance(item, dict)
             ],
+            research_domain=str(value.get("research_domain") or "computer_science"),
+            discovery_sources=[
+                str(item) for item in value.get("discovery_sources", ["dblp"])
+            ]
+            or ["dblp"],
             inclusion_criteria=[str(item) for item in value.get("inclusion_criteria", [])],
             exclusion_criteria=[str(item) for item in value.get("exclusion_criteria", [])],
             title_exclude_terms=[str(item) for item in value.get("title_exclude_terms", [])],
             include_arxiv=bool(value.get("include_arxiv", True)),
             include_informal=bool(value.get("include_informal", True)),
             llm_model=str(value.get("llm_model") or "gpt-5.4-mini"),
+            paper_qa_model=str(
+                value.get("paper_qa_model") or value.get("llm_model") or "gpt-5.4"
+            ),
+            corpus_analysis_model=str(
+                value.get("corpus_analysis_model")
+                or value.get("llm_model")
+                or "gpt-5.4"
+            ),
             llm_base_url=str(value.get("llm_base_url") or "https://api.openai.com/v1"),
             created_at=str(value.get("created_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
@@ -110,15 +127,25 @@ class ProjectStore:
         year_start: int,
         year_end: int,
         keyword_groups: list[KeywordGroup],
+        research_domain: str = "computer_science",
+        discovery_sources: list[str] | None = None,
         inclusion_criteria: list[str] | None = None,
         exclusion_criteria: list[str] | None = None,
         title_exclude_terms: list[str] | None = None,
         include_arxiv: bool = True,
         include_informal: bool = True,
         llm_model: str = "gpt-5.4-mini",
+        paper_qa_model: str = "gpt-5.4",
+        corpus_analysis_model: str = "gpt-5.4",
         llm_base_url: str = "https://api.openai.com/v1",
     ) -> ProjectSettings:
-        _validate_project_input(name, year_start, year_end, keyword_groups)
+        _validate_project_input(
+            name,
+            year_start,
+            year_end,
+            keyword_groups,
+            discovery_sources or ["dblp"],
+        )
         slug = self._available_slug(_slugify(name))
         now = datetime.now().isoformat(timespec="seconds")
         settings = ProjectSettings(
@@ -129,18 +156,33 @@ class ProjectStore:
             year_start=year_start,
             year_end=year_end,
             keyword_groups=keyword_groups,
+            research_domain=research_domain.strip() or "custom",
+            discovery_sources=discovery_sources or ["dblp"],
             inclusion_criteria=inclusion_criteria or [],
             exclusion_criteria=exclusion_criteria or [],
             title_exclude_terms=title_exclude_terms or [],
             include_arxiv=include_arxiv,
             include_informal=include_informal,
             llm_model=llm_model.strip(),
+            paper_qa_model=paper_qa_model.strip(),
+            corpus_analysis_model=corpus_analysis_model.strip(),
             llm_base_url=llm_base_url.strip(),
             created_at=now,
             updated_at=now,
         )
         project_dir = self.project_dir(slug)
-        for directory in ["configs/prompts", "runs", "audits", "exports", "cache", "seeds"]:
+        for directory in [
+            "configs/prompts",
+            "runs",
+            "audits",
+            "exports",
+            "cache",
+            "seeds",
+            "manual",
+            "papers",
+            "conversations",
+            "analysis",
+        ]:
             (project_dir / directory).mkdir(parents=True, exist_ok=True)
         self.save_project(settings)
         return settings
@@ -157,6 +199,7 @@ class ProjectStore:
             settings.year_start,
             settings.year_end,
             settings.keyword_groups,
+            settings.discovery_sources,
         )
         settings.updated_at = datetime.now().isoformat(timespec="seconds")
         project_dir = self.project_dir(settings.slug)
@@ -246,6 +289,7 @@ class ProjectStore:
 
         survey_inputs = {
             "years": {"start": settings.year_start, "end": settings.year_end},
+            "discovery": {"sources": _dedupe_terms(settings.discovery_sources)},
             "query": {
                 "strategy": "grouped",
                 "term_sets": term_sets,
@@ -266,6 +310,21 @@ class ProjectStore:
         key_path = self.api_key_path(settings.slug).resolve()
         pipeline_config = {
             "user_config": "survey_inputs.yaml",
+            "discovery": {
+                "sources": _dedupe_terms(settings.discovery_sources),
+                "cache_dir": str(project_dir / "cache" / "discovery"),
+                "results_per_page": 100,
+                "max_pages_per_query": 2,
+                "request_delay_seconds": 0.25,
+                "arxiv_request_delay_seconds": 3.0,
+                "timeout_seconds": 30,
+                "retries": 3,
+                "crossref_email_env": "CROSSREF_EMAIL",
+                "openalex_api_key_env": "OPENALEX_API_KEY",
+                "openalex_email_env": "OPENALEX_EMAIL",
+                "pubmed_api_key_env": "NCBI_API_KEY",
+                "pubmed_email_env": "NCBI_EMAIL",
+            },
             "dblp": {
                 "cache_dir": str(project_dir / "cache" / "dblp"),
                 "hits_per_page": 100,
@@ -388,6 +447,7 @@ def _validate_project_input(
     year_start: int,
     year_end: int,
     keyword_groups: list[KeywordGroup],
+    discovery_sources: list[str] | None = None,
 ) -> None:
     if not name.strip():
         raise ValueError("Project name is required.")
@@ -396,6 +456,8 @@ def _validate_project_input(
     valid_groups = [group for group in keyword_groups if group.name.strip() and group.terms]
     if not valid_groups:
         raise ValueError("Add at least one non-empty keyword group.")
+    if not discovery_sources:
+        raise ValueError("Select at least one available literature source.")
 
 
 def _slugify(value: str) -> str:

@@ -18,6 +18,8 @@ zip -q -FS -r "$OUTPUT_FILE" \
     compose.yaml \
     .dockerignore \
     src \
+    configs/domain_profiles.yaml \
+    configs/source_catalog.yaml \
     data/venue_quality \
     -x "*/__pycache__/*" "*.pyc"
 

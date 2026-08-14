@@ -15,6 +15,7 @@ from typing import Any
 import requests
 from rich.console import Console
 
+from vnn_survey.ai_research import CorpusAnalyzer, OpenAIResearchClient, load_csv_rows
 from vnn_survey.app.audit import (
     build_cumulative_audit,
     create_audit_queue,
@@ -23,12 +24,20 @@ from vnn_survey.app.audit import (
     read_csv,
     update_audit_rows,
 )
+from vnn_survey.app.manual_papers import ManualPaperStore
 from vnn_survey.app.project_store import ProjectStore
 from vnn_survey.config import load_config
 from vnn_survey.enrichment import enrich_candidates, write_enrichment_summary
+from vnn_survey.export import write_csv, write_jsonl
 from vnn_survey.llm_screening import llm_screen_candidates, write_llm_screening_summary
 from vnn_survey.llm_summary import summarize_llm_screening
-from vnn_survey.pipeline import collect_from_dblp, save_collection, summarize
+from vnn_survey.models import PaperRecord
+from vnn_survey.pipeline import (
+    collect_from_sources,
+    dedupe_records,
+    save_collection,
+    summarize,
+)
 from vnn_survey.screening import screen_candidates
 from vnn_survey.snowballing import (
     export_seed_papers_from_csv,
@@ -40,10 +49,21 @@ from vnn_survey.venue_quality import enrich_venue_quality, write_venue_quality_s
 ProgressCallback = Callable[[str, str, int | None, int | None, str], None]
 
 INITIAL_DISCOVERY_STAGES = [
-    "DBLP search",
+    "Literature search",
     "Venue enrichment",
     "Rule screening",
     "Abstract enrichment",
+]
+MANUAL_SYNC_STAGES = [
+    "Manual additions",
+    "Venue enrichment",
+    "Rule screening",
+    "Abstract enrichment",
+]
+CORPUS_ANALYSIS_STAGES = [
+    "Taxonomy design",
+    "Paper classification",
+    "Analysis report",
 ]
 AI_REVIEW_STAGES = ["AI screening", "Recommendation summary", "Audit queue"]
 MANUAL_REVIEW_STAGES = ["Review preparation", "Audit queue"]
@@ -64,6 +84,7 @@ class PipelineService:
         project_slug: str,
         *,
         source: str = "auto",
+        source_ids: list[str] | None = None,
         limit_queries: int | None = None,
         enrich_limit: int | None = None,
         core_online: bool = True,
@@ -73,6 +94,9 @@ class PipelineService:
             raise ValueError("DBLP source must be auto, api, or sparql.")
         settings = self.store.load_project(project_slug)
         config = load_config(self.store.config_path(project_slug))
+        selected_sources = list(dict.fromkeys(source_ids or settings.discovery_sources))
+        if not selected_sources:
+            raise ValueError("Select at least one available literature source.")
         run_id = _new_run_id()
         run_dir = self.store.project_dir(project_slug) / "runs" / run_id
         processed_dir = run_dir / "processed"
@@ -84,6 +108,7 @@ class PipelineService:
             "created_at": _now(),
             "updated_at": _now(),
             "source": source,
+            "sources": selected_sources,
             "rounds": [],
         }
         round_state = _new_round_state(index=0, kind="initial")
@@ -101,17 +126,26 @@ class PipelineService:
         )
 
         try:
-            _notify(tracked_progress, "DBLP search", "Collecting bibliographic records.")
-            result = collect_from_dblp(
+            _notify(
+                tracked_progress,
+                "Literature search",
+                "Collecting bibliographic records from the selected sources.",
+            )
+            manual_records = ManualPaperStore(
+                self.store.project_dir(project_slug)
+            ).load()
+            result = collect_from_sources(
                 config,
                 console=Console(file=io.StringIO(), no_color=True),
+                source_ids=selected_sources,
                 limit_queries=limit_queries,
-                source=source,
+                dblp_mode=source,
+                additional_records=manual_records,
                 progress_callback=_counted_item_progress(
                     tracked_progress,
                     state,
-                    "DBLP search",
-                    "Collecting bibliographic records.",
+                    "Literature search",
+                    "Collecting bibliographic records from the selected sources.",
                 ),
             )
             save_collection(result, output_dir=run_dir)
@@ -191,6 +225,7 @@ class PipelineService:
             }
             round_state["counts"] = {
                 **collection_summary,
+                "manual_records": len(manual_records),
                 "abstracts_found": enrichment_result.summary.with_abstract,
                 "abstracts_attempted": enrichment_result.summary.attempted,
             }
@@ -207,6 +242,161 @@ class PipelineService:
             return state
         except Exception as exc:
             self._mark_failed(project_slug, state, round_state, exc)
+            raise
+
+    def sync_manual_additions(
+        self,
+        project_slug: str,
+        *,
+        enrich_limit: int | None = None,
+        core_online: bool = True,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        initial_round = _get_round(state, 0)
+        if initial_round.get("files", {}).get("audit"):
+            raise RuntimeError(
+                "Manual papers cannot be synchronized after the initial review queue is created. "
+                "Start a new initial run to include them."
+            )
+        candidate_value = initial_round.get("files", {}).get("candidates")
+        if not candidate_value:
+            raise RuntimeError("Run initial discovery before synchronizing manual papers.")
+        manual_records = ManualPaperStore(self.store.project_dir(project_slug)).load()
+
+        config = load_config(self.store.config_path(project_slug))
+        candidates_path = Path(candidate_value)
+        processed_dir = candidates_path.parent
+        _, candidate_rows = read_csv(candidates_path)
+        candidate_records = [
+            record
+            for row in candidate_rows
+            if (record := _without_manual_provenance(PaperRecord.from_dict(row)))
+            is not None
+        ]
+        tracked_progress = self._begin_progress(
+            project_slug,
+            state,
+            operation="Manual additions",
+            heading="Synchronizing manual additions",
+            stages=MANUAL_SYNC_STAGES,
+            callback=progress,
+            paper_count=len(candidate_records),
+        )
+
+        try:
+            _notify(
+                tracked_progress,
+                "Manual additions",
+                "Merging manually added papers and removing duplicates.",
+            )
+            merged = dedupe_records([*candidate_records, *manual_records])
+            write_csv(merged, candidates_path)
+            write_jsonl(merged, candidates_path.with_suffix(".jsonl"))
+            write_jsonl(
+                manual_records,
+                processed_dir / "manual_additions_snapshot.jsonl",
+                include_raw=True,
+            )
+            _set_progress_paper_count(state, len(merged))
+
+            _notify(
+                tracked_progress,
+                "Venue enrichment",
+                "Adding publication type, CORE rank, and IF.",
+            )
+            venue_path = processed_dir / "candidate_papers_venues.csv"
+            venue_config = replace(config.venue_quality, core_online_enabled=core_online)
+            venue_result = enrich_venue_quality(
+                candidates_path,
+                venue_path,
+                venue_config,
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "Venue enrichment",
+                    "Adding publication type, CORE rank, and IF.",
+                ),
+            )
+            write_venue_quality_summary(
+                venue_result.summary,
+                processed_dir / "venue_quality_summary.json",
+            )
+
+            _notify(
+                tracked_progress,
+                "Rule screening",
+                "Applying the project's title exclusion rules.",
+            )
+            screened_path = processed_dir / "candidate_papers_screened.csv"
+            screening_result = screen_candidates(
+                venue_path,
+                screened_path,
+                config.screening,
+            )
+            _write_json(
+                processed_dir / "screening_summary.json",
+                {
+                    "total": screening_result.summary.total,
+                    "by_decision": dict(screening_result.summary.by_decision),
+                    "by_bucket": dict(screening_result.summary.by_bucket),
+                    "by_exclusion_code": dict(
+                        screening_result.summary.by_exclusion_code
+                    ),
+                },
+            )
+
+            _notify(
+                tracked_progress,
+                "Abstract enrichment",
+                "Looking up abstracts through OpenAlex.",
+            )
+            enriched_path = processed_dir / "candidate_papers_enriched.csv"
+            enrichment_result = enrich_candidates(
+                screened_path,
+                enriched_path,
+                config.enrichment,
+                decisions={"include_candidate", "needs_review"},
+                limit=enrich_limit,
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "Abstract enrichment",
+                    "Looking up abstracts through OpenAlex.",
+                ),
+            )
+            write_enrichment_summary(
+                enrichment_result.summary,
+                processed_dir / "abstract_enrichment_summary.json",
+            )
+
+            initial_round["status"] = "discovery_complete"
+            initial_round["files"].update(
+                {
+                    "venues": str(venue_path),
+                    "screened": str(screened_path),
+                    "enriched": str(enriched_path),
+                }
+            )
+            initial_round["counts"].update(
+                {
+                    "deduped_records": len(merged),
+                    "manual_records": len(manual_records),
+                    "abstracts_found": enrichment_result.summary.with_abstract,
+                    "abstracts_attempted": enrichment_result.summary.attempted,
+                }
+            )
+            state["status"] = "awaiting_ai_or_review"
+            self._save_state(project_slug, state)
+            self._complete_progress(
+                project_slug,
+                state,
+                progress,
+                stage="Manual additions synchronized",
+                message=f"The candidate set now contains {len(merged)} unique papers.",
+                paper_count=len(merged),
+            )
+            return state
+        except Exception as exc:
+            self._mark_failed(project_slug, state, initial_round, exc)
             raise
 
     def prepare_round_for_review(
@@ -576,6 +766,91 @@ class PipelineService:
         self._save_state(project_slug, state)
         return {"audit": cumulative_path, "included": included_path, "report": report_path}
 
+    def analyze_final_corpus(
+        self,
+        project_slug: str,
+        *,
+        criteria: str = "",
+        model: str = "",
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        included_value = state.get("exports", {}).get("included")
+        if not included_value or not Path(included_value).exists():
+            raise RuntimeError("Generate final exports before analyzing the corpus.")
+        rows = load_csv_rows(Path(included_value))
+        if not rows:
+            raise RuntimeError("The final included corpus is empty.")
+        settings = self.store.load_project(project_slug)
+        selected_model = model.strip() or settings.corpus_analysis_model
+        api_key = self.store.read_api_key(project_slug) or os.environ.get(
+            "OPENAI_API_KEY", ""
+        )
+        client = OpenAIResearchClient(
+            base_url=settings.llm_base_url,
+            api_key=api_key,
+            model=selected_model,
+        )
+        analyzer = CorpusAnalyzer(client)
+        analysis_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        output_dir = (
+            self.store.project_dir(project_slug)
+            / "analysis"
+            / state["run_id"]
+            / analysis_id
+        )
+        tracked_progress = self._begin_progress(
+            project_slug,
+            state,
+            operation="Corpus analysis",
+            heading="Analyzing the final corpus",
+            stages=CORPUS_ANALYSIS_STAGES,
+            callback=progress,
+            paper_count=len(rows),
+        )
+
+        try:
+            result = analyzer.analyze(
+                rows=rows,
+                research_question=settings.research_question,
+                scope_description=settings.scope_description,
+                criteria=criteria,
+                output_dir=output_dir,
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "Paper classification",
+                    "Classifying every paper with the fixed taxonomy.",
+                ),
+                stage_callback=lambda stage, message: _notify(
+                    tracked_progress,
+                    stage,
+                    message,
+                ),
+            )
+            state["corpus_analysis"] = {
+                "analysis_id": analysis_id,
+                "model": selected_model,
+                "criteria": criteria.strip(),
+                "paper_count": len(rows),
+                "taxonomy": str(result.taxonomy_path),
+                "classifications": str(result.classifications_path),
+                "report": str(result.report_path),
+                "created_at": _now(),
+            }
+            self._save_state(project_slug, state)
+            self._complete_progress(
+                project_slug,
+                state,
+                progress,
+                stage="Corpus analysis complete",
+                message="Corpus classification artifacts are ready.",
+                paper_count=len(rows),
+            )
+            return state
+        except Exception as exc:
+            self._mark_progress_failed(project_slug, state, exc)
+            raise
+
     def load_current_state(self, project_slug: str) -> dict[str, Any]:
         settings = self.store.load_project(project_slug)
         if not settings.current_run_id:
@@ -696,6 +971,24 @@ class PipelineService:
         state["progress"] = progress_state
         self._save_state(project_slug, state)
 
+    def _mark_progress_failed(
+        self,
+        project_slug: str,
+        state: dict[str, Any],
+        exc: Exception,
+    ) -> None:
+        progress_state = state.get("progress", {})
+        progress_state.update(
+            {
+                "status": "failed",
+                "message": str(exc),
+                "current": "",
+                "updated_at": _now(),
+            }
+        )
+        state["progress"] = progress_state
+        self._save_state(project_slug, state)
+
 
 def test_openai_connection(base_url: str, api_key: str, timeout: int = 20) -> tuple[bool, str]:
     key = api_key.strip()
@@ -711,6 +1004,34 @@ def test_openai_connection(base_url: str, api_key: str, timeout: int = 20) -> tu
     except requests.RequestException as exc:
         return False, f"Connection failed: {exc}"
     return True, "Connection succeeded."
+
+
+def list_openai_models(
+    base_url: str,
+    api_key: str,
+    timeout: int = 20,
+) -> tuple[list[str], str]:
+    key = api_key.strip()
+    if not key:
+        return [], "Enter an API key first."
+    try:
+        response = requests.get(
+            f"{base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        values = response.json().get("data", [])
+    except (requests.RequestException, ValueError) as exc:
+        return [], f"Connection failed: {exc}"
+    model_ids = sorted(
+        {
+            str(item.get("id") or "").strip()
+            for item in values
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }
+    )
+    return model_ids, "Connection succeeded."
 
 
 def _new_round_state(index: int, kind: str) -> dict[str, Any]:
@@ -784,6 +1105,28 @@ def _counted_item_progress(
 
 def _set_progress_paper_count(state: dict[str, Any], paper_count: int) -> None:
     state.setdefault("progress", {})["paper_count"] = max(int(paper_count), 0)
+
+
+def _without_manual_provenance(record: PaperRecord) -> PaperRecord | None:
+    automatic_sources = [
+        source for source in record.discovery_sources if source != "manual"
+    ]
+    if not automatic_sources:
+        return None
+    automatic_queries = [
+        query for query in record.discovery_queries if query != "manual addition"
+    ]
+    return replace(
+        record,
+        source=record.source if record.source != "manual" else automatic_sources[0],
+        query=record.query
+        if record.query != "manual addition"
+        else (automatic_queries[0] if automatic_queries else ""),
+        discovery_sources=automatic_sources,
+        discovery_queries=automatic_queries,
+        manual_added=False,
+        manual_note=None,
+    )
 
 
 def _round_paper_count(round_state: dict[str, Any]) -> int:

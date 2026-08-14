@@ -1,0 +1,113 @@
+sources:
+  dblp:
+    label: DBLP
+    status: available
+    record_types: [conference papers, journal articles, books]
+    capabilities: [metadata]
+    requires_key: false
+    scope:
+      en: Curated computer science bibliography with strong conference coverage.
+      zh: 经过整理的计算机科学文献数据库，会议论文覆盖较强。
+      ja: コンピューターサイエンスを対象とし、国際会議論文に強い書誌データベースです。
+      ko: 컴퓨터 과학을 중심으로 하며 학술대회 논문 수록에 강한 서지 데이터베이스입니다.
+    limitation:
+      en: Not intended to cover fields outside computer science.
+      zh: 不适合用于覆盖计算机科学以外的学科。
+      ja: コンピューターサイエンス以外の分野を網羅するものではありません。
+      ko: 컴퓨터 과학 이외 분야를 포괄하도록 설계된 데이터베이스가 아닙니다.
+  openalex:
+    label: OpenAlex
+    status: available
+    record_types: [articles, books, chapters, dissertations, preprints]
+    capabilities: [metadata, abstracts, citations, open access links]
+    requires_key: false
+    scope:
+      en: Broad multidisciplinary index covering sciences, social sciences, and humanities.
+      zh: 覆盖自然科学、社会科学和人文学科的综合性学术索引。
+      ja: 自然科学、社会科学、人文学を幅広く扱う学際的な学術索引です。
+      ko: 자연과학, 사회과학, 인문학을 폭넓게 다루는 다학제 학술 색인입니다.
+    limitation:
+      en: Coverage and metadata completeness vary by field and publication type.
+      zh: 不同学科和成果类型的覆盖率及元数据完整度存在差异。
+      ja: 分野や成果種別によって収録率とメタデータの完全性が異なります。
+      ko: 분야와 출판물 유형에 따라 수록 범위와 메타데이터 완성도가 다릅니다.
+  crossref:
+    label: Crossref
+    status: available
+    record_types: [journal articles, proceedings, books, chapters, datasets]
+    capabilities: [metadata, DOI resolution]
+    requires_key: false
+    scope:
+      en: Publisher-deposited scholarly metadata across many disciplines.
+      zh: 覆盖多个学科、由出版机构提交的 DOI 与学术成果元数据。
+      ja: 多分野の出版社登録 DOI と学術成果メタデータを提供します。
+      ko: 여러 학문 분야에서 출판사가 등록한 DOI와 학술 메타데이터를 제공합니다.
+    limitation:
+      en: Records without a Crossref DOI and some older or local publications may be absent.
+      zh: 没有 Crossref DOI 的成果以及部分早期或地方出版物可能缺失。
+      ja: Crossref DOI のない成果や、一部の古い・地域的な出版物は含まれない場合があります。
+      ko: Crossref DOI가 없는 자료와 일부 오래된 지역 출판물은 누락될 수 있습니다.
+  arxiv:
+    label: arXiv
+    status: available
+    record_types: [preprints]
+    capabilities: [metadata, abstracts, PDF links]
+    requires_key: false
+    scope:
+      en: Preprints in physics, mathematics, computer science, and related quantitative fields.
+      zh: 物理、数学、计算机科学及相关定量领域的预印本。
+      ja: 物理学、数学、コンピューターサイエンスなどのプレプリントを収録します。
+      ko: 물리학, 수학, 컴퓨터 과학 및 관련 정량 분야의 프리프린트를 제공합니다.
+    limitation:
+      en: Primarily preprints; it does not represent all disciplines or peer-reviewed venues.
+      zh: 主要收录预印本，不能代表所有学科或同行评审出版物。
+      ja: 主にプレプリントであり、すべての分野や査読済み出版物を代表しません。
+      ko: 주로 프리프린트이며 모든 분야나 동료평가 출판물을 대표하지 않습니다.
+  pubmed:
+    label: PubMed
+    status: available
+    record_types: [biomedical journal articles]
+    capabilities: [metadata, abstracts, related articles]
+    requires_key: false
+    scope:
+      en: Biomedical and life-science literature indexed by the U.S. National Library of Medicine.
+      zh: 由美国国家医学图书馆提供的生物医学与生命科学文献索引。
+      ja: 米国国立医学図書館による生物医学・生命科学文献索引です。
+      ko: 미국 국립의학도서관이 제공하는 생의학 및 생명과학 문헌 색인입니다.
+    limitation:
+      en: Specialized for biomedicine and not suitable as a general humanities or engineering index.
+      zh: 专注于生物医学，不适合作为人文或一般工程领域的综合索引。
+      ja: 生物医学に特化しており、人文学や一般工学の総合索引には適しません。
+      ko: 생의학에 특화되어 인문학이나 일반 공학의 종합 색인으로는 적합하지 않습니다.
+  openaire:
+    label: OpenAIRE
+    status: planned
+    record_types: [articles, datasets, software, repository records]
+    capabilities: [metadata, open access links, research graph]
+    requires_key: false
+    scope:
+      en: Open research products aggregated from repositories and scholarly infrastructures.
+      zh: 从机构知识库和学术基础设施聚合的开放研究成果。
+      ja: リポジトリや学術基盤から集約されたオープンな研究成果です。
+      ko: 리포지터리와 학술 인프라에서 집계한 공개 연구 성과입니다.
+    limitation:
+      en: Connector planned; it cannot be selected for live searches yet.
+      zh: 连接器尚在计划中，目前不能用于实时检索。
+      ja: コネクターは計画中で、まだライブ検索には使用できません。
+      ko: 커넥터가 개발 예정이므로 아직 실시간 검색에 사용할 수 없습니다.
+  europeana:
+    label: Europeana
+    status: planned
+    record_types: [artworks, books, archival objects, audiovisual materials]
+    capabilities: [cultural heritage metadata, media links]
+    requires_key: true
+    scope:
+      en: Cultural heritage objects from European museums, galleries, libraries, and archives.
+      zh: 来自欧洲博物馆、画廊、图书馆和档案馆的文化遗产对象。
+      ja: 欧州の博物館、美術館、図書館、アーカイブの文化遺産資料を扱います。
+      ko: 유럽의 박물관, 미술관, 도서관, 기록관이 보유한 문화유산 자료를 다룹니다.
+    limitation:
+      en: Connector planned. These are research objects rather than ordinary paper records.
+      zh: 连接器尚在计划中；其记录属于研究对象，而不是普通论文。
+      ja: コネクターは計画中です。通常の論文ではなく研究対象資料として扱います。
+      ko: 커넥터가 개발 예정이며 일반 논문이 아닌 연구 대상 자료로 취급합니다.

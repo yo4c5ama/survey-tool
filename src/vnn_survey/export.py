@@ -6,7 +6,6 @@ from pathlib import Path
 
 from vnn_survey.models import PaperRecord
 
-
 FIELDNAMES = [
     "title",
     "authors",
@@ -19,6 +18,10 @@ FIELDNAMES = [
     "source",
     "query",
     "provider_id",
+    "discovery_sources",
+    "discovery_queries",
+    "manual_added",
+    "manual_note",
 ]
 
 
@@ -40,4 +43,3 @@ def write_csv(records: list[PaperRecord], path: Path) -> None:
         for record in records:
             row = record.to_row()
             writer.writerow({field: row.get(field) for field in FIELDNAMES})
-

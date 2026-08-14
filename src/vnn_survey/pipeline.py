@@ -2,17 +2,18 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from vnn_survey.config import SurveyConfig
+from vnn_survey.config import SurveyConfig, expand_query_alternatives
 from vnn_survey.dblp import DblpClient
 from vnn_survey.dblp_sparql import DblpSparqlClient
 from vnn_survey.export import write_csv, write_jsonl
 from vnn_survey.models import PaperRecord
+from vnn_survey.sources import create_provider
 
 CollectionProgressCallback = Callable[[int, int, str, int], None]
 
@@ -81,6 +82,81 @@ def collect_from_dblp(
     )
 
 
+def collect_from_sources(
+    config: SurveyConfig,
+    console: Console,
+    *,
+    source_ids: list[str] | None = None,
+    limit_queries: int | None = None,
+    dblp_mode: str = "auto",
+    additional_records: list[PaperRecord] | None = None,
+    progress_callback: CollectionProgressCallback | None = None,
+) -> CollectionResult:
+    selected_sources = source_ids or config.discovery.sources or ["dblp"]
+    selected_sources = list(dict.fromkeys(selected_sources))
+    queries = config.build_queries()
+    if limit_queries is not None:
+        queries = queries[:limit_queries]
+    request_plan = [
+        (source_id, source_query)
+        for source_id in selected_sources
+        for query in queries
+        for source_query in (
+            [query] if source_id == "dblp" else expand_query_alternatives(query)
+        )
+    ]
+    total_requests = len(request_plan)
+    completed_requests = 0
+    raw_records: list[PaperRecord] = []
+    failed_queries: dict[str, str] = {}
+    fallback_queries: dict[str, str] = {}
+    if progress_callback:
+        progress_callback(0, total_requests, "", 0)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Searching literature sources", total=total_requests)
+        providers = {
+            source_id: create_provider(source_id, config, dblp_mode=dblp_mode)
+            for source_id in selected_sources
+        }
+        for source_id, query in request_plan:
+            current = f"{source_id}: {query}"
+            progress.update(task, description=current)
+            try:
+                result = providers[source_id].search(query)
+                raw_records.extend(result.records)
+                if result.fallback_error:
+                    fallback_queries[current] = result.fallback_error
+            except Exception as exc:  # noqa: BLE001 - preserve partial multi-source results.
+                failed_queries[current] = str(exc)
+            completed_requests += 1
+            progress.advance(task)
+            if progress_callback:
+                candidate_count = len(dedupe_records(apply_filters(raw_records, config)))
+                progress_callback(
+                    completed_requests,
+                    total_requests,
+                    current,
+                    candidate_count,
+                )
+
+    raw_records.extend(additional_records or [])
+    filtered = apply_filters(raw_records, config)
+    deduped = dedupe_records(filtered)
+    return CollectionResult(
+        raw_records=raw_records,
+        filtered_records=filtered,
+        deduped_records=deduped,
+        failed_queries=failed_queries,
+        fallback_queries=fallback_queries,
+    )
+
+
 def _search_query(
     query: str,
     source: str,
@@ -122,15 +198,24 @@ def dedupe_records(records: list[PaperRecord]) -> list[PaperRecord]:
     index: dict[str, int] = {}
     for record in records:
         keys = _dedupe_keys(record)
-        group_id = next((index[key] for key in keys if key in index), None)
-        if group_id is None:
+        group_ids = {index[key] for key in keys if key in index}
+        if not group_ids:
             group_id = len(deduped)
+            while group_id in deduped:
+                group_id += 1
             deduped[group_id] = record
             for key in keys:
                 index[key] = group_id
             continue
-        deduped[group_id] = _prefer_richer_record(deduped[group_id], record)
-        for key in keys:
+        group_id = min(group_ids)
+        merged = record
+        for matched_id in sorted(group_ids):
+            merged = _merge_records(deduped.pop(matched_id), merged)
+        deduped[group_id] = merged
+        for key, indexed_group in list(index.items()):
+            if indexed_group in group_ids:
+                index[key] = group_id
+        for key in _dedupe_keys(merged):
             index[key] = group_id
     return sorted(deduped.values(), key=lambda item: ((item.year or 9999), item.title.lower()))
 
@@ -153,8 +238,11 @@ def save_collection(result: CollectionResult, output_dir: Path) -> None:
     raw_dir = output_dir / "raw"
     processed_dir = output_dir / "processed"
 
-    write_jsonl(result.raw_records, raw_dir / "dblp_raw.jsonl", include_raw=True)
-    write_jsonl(result.filtered_records, processed_dir / "dblp_filtered.jsonl")
+    write_jsonl(result.raw_records, raw_dir / "discovery_raw.jsonl", include_raw=True)
+    write_jsonl(result.filtered_records, processed_dir / "discovery_filtered.jsonl")
+    if all(record.source == "dblp" for record in result.raw_records):
+        write_jsonl(result.raw_records, raw_dir / "dblp_raw.jsonl", include_raw=True)
+        write_jsonl(result.filtered_records, processed_dir / "dblp_filtered.jsonl")
     write_jsonl(result.deduped_records, processed_dir / "candidate_papers.jsonl")
     write_csv(result.deduped_records, processed_dir / "candidate_papers.csv")
 
@@ -176,6 +264,11 @@ def _write_query_log(path: Path, entries: dict[str, str]) -> None:
 def summarize(result: CollectionResult) -> dict[str, object]:
     by_year = Counter(record.year for record in result.deduped_records if record.year is not None)
     by_venue = Counter(record.venue or "unknown" for record in result.deduped_records)
+    by_source = Counter(
+        source
+        for record in result.deduped_records
+        for source in (record.discovery_sources or [record.source])
+    )
     return {
         "raw_records": len(result.raw_records),
         "filtered_records": len(result.filtered_records),
@@ -184,13 +277,29 @@ def summarize(result: CollectionResult) -> dict[str, object]:
         "fallback_queries": len(result.fallback_queries),
         "top_years": by_year.most_common(10),
         "top_venues": by_venue.most_common(10),
+        "by_source": dict(by_source),
     }
 
 
-def _prefer_richer_record(left: PaperRecord, right: PaperRecord) -> PaperRecord:
+def _merge_records(left: PaperRecord, right: PaperRecord) -> PaperRecord:
     left_score = _richness_score(left)
     right_score = _richness_score(right)
-    return right if right_score > left_score else left
+    primary = right if right_score > left_score else left
+    return replace(
+        primary,
+        discovery_sources=_merge_values(
+            left.discovery_sources,
+            right.discovery_sources,
+            [left.source, right.source],
+        ),
+        discovery_queries=_merge_values(
+            left.discovery_queries,
+            right.discovery_queries,
+            [left.query, right.query],
+        ),
+        manual_added=left.manual_added or right.manual_added,
+        manual_note=left.manual_note or right.manual_note,
+    )
 
 
 def _richness_score(record: PaperRecord) -> int:
@@ -205,8 +314,22 @@ def _richness_score(record: PaperRecord) -> int:
             1 if record.year else 0,
             1 if record.authors else 0,
             1 if record.dblp_key else 0,
+            1 if record.provider_id else 0,
         ]
     )
+
+
+def _merge_values(*groups: list[str]) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for value in (item for group in groups for item in group):
+        normalized = value.strip()
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        merged.append(normalized)
+    return merged
 
 
 def _normalized_title(title: str) -> str:
@@ -216,7 +339,12 @@ def _normalized_title(title: str) -> str:
 def _is_corr(record: PaperRecord) -> bool:
     venue = (record.venue or "").lower()
     key = (record.dblp_key or "").lower()
-    return "corr" in venue or key.startswith("journals/corr")
+    return (
+        record.source == "arxiv"
+        or "arxiv" in record.discovery_sources
+        or "corr" in venue
+        or key.startswith("journals/corr")
+    )
 
 
 def _is_informal(record: PaperRecord) -> bool:

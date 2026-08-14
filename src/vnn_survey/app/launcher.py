@@ -17,6 +17,7 @@ def main() -> None:
         str(app_path),
         "--server.headless=true",
         "--browser.gatherUsageStats=false",
+        "--server.maxUploadSize=50",
         f"--server.address={address}",
         f"--server.port={port}",
     ]

@@ -1,0 +1,118 @@
+profiles:
+  general:
+    label:
+      en: General / interdisciplinary
+      zh: 综合 / 跨学科
+      ja: 総合 / 学際
+      ko: 종합 / 학제간
+    description:
+      en: Broad searches spanning more than one academic discipline.
+      zh: 跨越一个以上学科的综合性研究。
+      ja: 複数の学問分野にまたがる幅広い研究です。
+      ko: 둘 이상의 학문 분야를 아우르는 폭넓은 연구입니다.
+    recommended_sources: [openalex, crossref]
+    optional_sources: [openaire]
+  computer_science:
+    label:
+      en: Computer science / AI
+      zh: 计算机科学 / AI
+      ja: コンピューターサイエンス / AI
+      ko: 컴퓨터 과학 / AI
+    description:
+      en: Software, systems, theory, artificial intelligence, and human-computer interaction.
+      zh: 软件、系统、理论、人工智能与人机交互研究。
+      ja: ソフトウェア、システム、理論、人工知能、HCI を扱います。
+      ko: 소프트웨어, 시스템, 이론, 인공지능, HCI 연구를 다룹니다.
+    recommended_sources: [dblp, openalex, arxiv]
+    optional_sources: [crossref]
+  engineering:
+    label:
+      en: Engineering and technology
+      zh: 工程与技术
+      ja: 工学・技術
+      ko: 공학 및 기술
+    description:
+      en: Electrical, mechanical, civil, manufacturing, and applied technology research.
+      zh: 电气、机械、土木、制造与应用技术研究。
+      ja: 電気、機械、土木、製造、応用技術の研究です。
+      ko: 전기, 기계, 토목, 제조 및 응용 기술 연구입니다.
+    recommended_sources: [openalex, crossref]
+    optional_sources: [arxiv, openaire]
+  mathematics_physics:
+    label:
+      en: Mathematics / physics
+      zh: 数学 / 物理
+      ja: 数学 / 物理学
+      ko: 수학 / 물리학
+    description:
+      en: Mathematical, physical, and closely related quantitative research.
+      zh: 数学、物理及密切相关的定量研究。
+      ja: 数学、物理学、および関連する定量研究です。
+      ko: 수학, 물리학 및 밀접한 관련이 있는 정량 연구입니다.
+    recommended_sources: [arxiv, openalex, crossref]
+    optional_sources: []
+  medicine_life_sciences:
+    label:
+      en: Medicine / life sciences
+      zh: 医学 / 生命科学
+      ja: 医学 / 生命科学
+      ko: 의학 / 생명과학
+    description:
+      en: Clinical, biomedical, biological, and public-health research.
+      zh: 临床、生物医学、生物学与公共卫生研究。
+      ja: 臨床、生物医学、生物学、公衆衛生の研究です。
+      ko: 임상, 생의학, 생물학 및 공중보건 연구입니다.
+    recommended_sources: [pubmed, openalex, crossref]
+    optional_sources: [openaire]
+  social_sciences:
+    label:
+      en: Social sciences
+      zh: 社会科学
+      ja: 社会科学
+      ko: 사회과학
+    description:
+      en: Sociology, psychology, economics, education, politics, and related fields.
+      zh: 社会学、心理学、经济学、教育、政治及相关领域。
+      ja: 社会学、心理学、経済学、教育、政治などを扱います。
+      ko: 사회학, 심리학, 경제학, 교육, 정치 및 관련 분야를 다룹니다.
+    recommended_sources: [openalex, crossref]
+    optional_sources: [openaire]
+  humanities:
+    label:
+      en: Humanities
+      zh: 人文学科
+      ja: 人文学
+      ko: 인문학
+    description:
+      en: History, literature, philosophy, languages, religion, and cultural studies.
+      zh: 历史、文学、哲学、语言、宗教与文化研究。
+      ja: 歴史、文学、哲学、言語、宗教、文化研究を扱います。
+      ko: 역사, 문학, 철학, 언어, 종교 및 문화 연구를 다룹니다.
+    recommended_sources: [openalex, crossref]
+    optional_sources: [openaire]
+  arts_design:
+    label:
+      en: Arts / design / architecture
+      zh: 艺术 / 设计 / 建筑
+      ja: 芸術 / デザイン / 建築
+      ko: 예술 / 디자인 / 건축
+    description:
+      en: Scholarly writing on visual arts, design, architecture, media, and creative practice.
+      zh: 视觉艺术、设计、建筑、媒体与创作实践方面的学术研究。
+      ja: 視覚芸術、デザイン、建築、メディア、創作実践の学術研究です。
+      ko: 시각예술, 디자인, 건축, 미디어 및 창작 실천에 관한 학술 연구입니다.
+    recommended_sources: [openalex, crossref]
+    optional_sources: [openaire, europeana, dblp]
+  custom:
+    label:
+      en: Custom field
+      zh: 自定义领域
+      ja: カスタム分野
+      ko: 사용자 지정 분야
+    description:
+      en: Choose sources manually for a specialized or mixed research scope.
+      zh: 为专门或混合研究范围手动选择数据源。
+      ja: 専門的または混合的な研究範囲に合わせてデータソースを手動選択します。
+      ko: 전문적이거나 혼합된 연구 범위에 맞게 데이터 소스를 직접 선택합니다.
+    recommended_sources: [openalex, crossref]
+    optional_sources: [dblp, arxiv, pubmed, openaire, europeana]

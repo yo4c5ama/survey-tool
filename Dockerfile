@@ -14,6 +14,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY configs/domain_profiles.yaml configs/source_catalog.yaml ./configs/
 COPY data/venue_quality ./data/venue_quality
 
 RUN uv sync --frozen --no-dev \
