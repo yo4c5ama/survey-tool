@@ -45,20 +45,25 @@ from vnn_survey.snowballing import (
     snowball_candidates,
     write_snowballing_summary,
 )
+from vnn_survey.title_screening import (
+    TitleScreeningResult,
+    screen_titles_with_llm,
+    write_title_screening_summary,
+)
 from vnn_survey.venue_quality import enrich_venue_quality, write_venue_quality_summary
 
 ProgressCallback = Callable[[str, str, int | None, int | None, str], None]
 
 INITIAL_DISCOVERY_STAGES = [
     "Literature search",
-    "Venue enrichment",
     "Rule screening",
+    "Venue enrichment",
     "Abstract enrichment",
 ]
 MANUAL_SYNC_STAGES = [
     "Manual additions",
-    "Venue enrichment",
     "Rule screening",
+    "Venue enrichment",
     "Abstract enrichment",
 ]
 CORPUS_ANALYSIS_STAGES = [
@@ -70,8 +75,8 @@ AI_REVIEW_STAGES = ["AI screening", "Recommendation summary", "Audit queue"]
 MANUAL_REVIEW_STAGES = ["Review preparation", "Audit queue"]
 SNOWBALL_STAGES = [
     "Citation snowballing",
-    "Venue enrichment",
     "Rule screening",
+    "Venue enrichment",
     "Abstract enrichment",
 ]
 
@@ -89,6 +94,8 @@ class PipelineService:
         limit_queries: int | None = None,
         enrich_limit: int | None = None,
         core_online: bool = True,
+        use_title_llm: bool = False,
+        title_batch_size: int = 100,
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         if source not in {"auto", "api", "sparql"}:
@@ -98,6 +105,10 @@ class PipelineService:
         selected_sources = list(dict.fromkeys(source_ids or settings.discovery_sources))
         if not selected_sources:
             raise ValueError("Select at least one available literature source.")
+        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
+            "OPENAI_API_KEY"
+        ):
+            raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
         run_id = _new_run_id()
         run_dir = self.store.project_dir(project_slug) / "runs" / run_id
         processed_dir = run_dir / "processed"
@@ -110,6 +121,10 @@ class PipelineService:
             "updated_at": _now(),
             "source": source,
             "sources": selected_sources,
+            "options": {
+                "title_llm_enabled": use_title_llm,
+                "title_llm_batch_size": title_batch_size,
+            },
             "rounds": [],
         }
         round_state = _new_round_state(index=0, kind="initial")
@@ -121,7 +136,7 @@ class PipelineService:
             state,
             operation="Initial discovery",
             heading="Running initial discovery",
-            stages=INITIAL_DISCOVERY_STAGES,
+            stages=_with_title_screening_stage(INITIAL_DISCOVERY_STAGES, use_title_llm),
             callback=progress,
             paper_count=0,
         )
@@ -157,15 +172,52 @@ class PipelineService:
 
             _notify(
                 tracked_progress,
+                "Rule screening",
+                "Applying the project's title exclusion rules.",
+            )
+            screened_path = processed_dir / "candidate_papers_screened.csv"
+            screening_result = screen_candidates(candidates, screened_path, config.screening)
+            _write_json(
+                processed_dir / "screening_summary.json",
+                {
+                    "total": screening_result.summary.total,
+                    "by_decision": dict(screening_result.summary.by_decision),
+                    "by_bucket": dict(screening_result.summary.by_bucket),
+                    "by_exclusion_code": dict(screening_result.summary.by_exclusion_code),
+                },
+            )
+
+            title_input, title_result = self._title_prescreen(
+                project_slug,
+                screened_path,
+                processed_dir / "candidate_papers_title_screened.csv",
+                enabled=use_title_llm,
+                batch_size=title_batch_size,
+                progress=tracked_progress,
+            )
+            round_state["counts"].update(
+                {
+                    "deduped_records": int(collection_summary["deduped_records"]),
+                    "rule_excluded": screening_result.summary.by_decision.get(
+                        "exclude", 0
+                    ),
+                    **_title_screening_counts(title_result),
+                }
+            )
+            self._save_state(project_slug, state)
+
+            _notify(
+                tracked_progress,
                 "Venue enrichment",
                 "Adding publication type, CORE rank, and IF.",
             )
             venue_path = processed_dir / "candidate_papers_venues.csv"
             venue_config = replace(config.venue_quality, core_online_enabled=core_online)
             venue_result = enrich_venue_quality(
-                candidates,
+                title_input,
                 venue_path,
                 venue_config,
+                decisions={"include_candidate", "needs_review"},
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Venue enrichment",
@@ -179,29 +231,12 @@ class PipelineService:
 
             _notify(
                 tracked_progress,
-                "Rule screening",
-                "Applying the project's title exclusion rules.",
-            )
-            screened_path = processed_dir / "candidate_papers_screened.csv"
-            screening_result = screen_candidates(venue_path, screened_path, config.screening)
-            _write_json(
-                processed_dir / "screening_summary.json",
-                {
-                    "total": screening_result.summary.total,
-                    "by_decision": dict(screening_result.summary.by_decision),
-                    "by_bucket": dict(screening_result.summary.by_bucket),
-                    "by_exclusion_code": dict(screening_result.summary.by_exclusion_code),
-                },
-            )
-
-            _notify(
-                tracked_progress,
                 "Abstract enrichment",
                 "Looking up abstracts through OpenAlex.",
             )
             enriched_path = processed_dir / "candidate_papers_enriched.csv"
             enrichment_result = enrich_candidates(
-                screened_path,
+                venue_path,
                 enriched_path,
                 config.enrichment,
                 decisions={"include_candidate", "needs_review"},
@@ -220,13 +255,20 @@ class PipelineService:
             round_state["status"] = "discovery_complete"
             round_state["files"] = {
                 "candidates": str(candidates),
-                "venues": str(venue_path),
                 "screened": str(screened_path),
+                **(
+                    {"title_screened": str(title_input)}
+                    if title_result is not None
+                    else {}
+                ),
+                "venues": str(venue_path),
                 "enriched": str(enriched_path),
             }
             round_state["counts"] = {
                 **collection_summary,
                 "manual_records": len(manual_records),
+                "rule_excluded": screening_result.summary.by_decision.get("exclude", 0),
+                **_title_screening_counts(title_result),
                 "abstracts_found": enrichment_result.summary.with_abstract,
                 "abstracts_attempted": enrichment_result.summary.attempted,
             }
@@ -257,6 +299,13 @@ class PipelineService:
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
+        run_options = state.get("options", {})
+        use_title_llm = bool(run_options.get("title_llm_enabled", False))
+        title_batch_size = int(run_options.get("title_llm_batch_size", 100))
+        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
+            "OPENAI_API_KEY"
+        ):
+            raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
         initial_round = _get_round(state, 0)
         if initial_round.get("files", {}).get("audit"):
             raise RuntimeError(
@@ -283,7 +332,7 @@ class PipelineService:
             state,
             operation="Manual additions",
             heading="Synchronizing manual additions",
-            stages=MANUAL_SYNC_STAGES,
+            stages=_with_title_screening_stage(MANUAL_SYNC_STAGES, use_title_llm),
             callback=progress,
             paper_count=len(candidate_records),
         )
@@ -306,34 +355,12 @@ class PipelineService:
 
             _notify(
                 tracked_progress,
-                "Venue enrichment",
-                "Adding publication type, CORE rank, and IF.",
-            )
-            venue_path = processed_dir / "candidate_papers_venues.csv"
-            venue_config = replace(config.venue_quality, core_online_enabled=core_online)
-            venue_result = enrich_venue_quality(
-                candidates_path,
-                venue_path,
-                venue_config,
-                progress_callback=_item_progress(
-                    tracked_progress,
-                    "Venue enrichment",
-                    "Adding publication type, CORE rank, and IF.",
-                ),
-            )
-            write_venue_quality_summary(
-                venue_result.summary,
-                processed_dir / "venue_quality_summary.json",
-            )
-
-            _notify(
-                tracked_progress,
                 "Rule screening",
                 "Applying the project's title exclusion rules.",
             )
             screened_path = processed_dir / "candidate_papers_screened.csv"
             screening_result = screen_candidates(
-                venue_path,
+                candidates_path,
                 screened_path,
                 config.screening,
             )
@@ -349,6 +376,48 @@ class PipelineService:
                 },
             )
 
+            title_input, title_result = self._title_prescreen(
+                project_slug,
+                screened_path,
+                processed_dir / "candidate_papers_title_screened.csv",
+                enabled=use_title_llm,
+                batch_size=title_batch_size,
+                progress=tracked_progress,
+            )
+            initial_round["counts"].update(
+                {
+                    "deduped_records": len(merged),
+                    "rule_excluded": screening_result.summary.by_decision.get(
+                        "exclude", 0
+                    ),
+                    **_title_screening_counts(title_result),
+                }
+            )
+            self._save_state(project_slug, state)
+
+            _notify(
+                tracked_progress,
+                "Venue enrichment",
+                "Adding publication type, CORE rank, and IF.",
+            )
+            venue_path = processed_dir / "candidate_papers_venues.csv"
+            venue_config = replace(config.venue_quality, core_online_enabled=core_online)
+            venue_result = enrich_venue_quality(
+                title_input,
+                venue_path,
+                venue_config,
+                decisions={"include_candidate", "needs_review"},
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "Venue enrichment",
+                    "Adding publication type, CORE rank, and IF.",
+                ),
+            )
+            write_venue_quality_summary(
+                venue_result.summary,
+                processed_dir / "venue_quality_summary.json",
+            )
+
             _notify(
                 tracked_progress,
                 "Abstract enrichment",
@@ -356,7 +425,7 @@ class PipelineService:
             )
             enriched_path = processed_dir / "candidate_papers_enriched.csv"
             enrichment_result = enrich_candidates(
-                screened_path,
+                venue_path,
                 enriched_path,
                 config.enrichment,
                 decisions={"include_candidate", "needs_review"},
@@ -377,6 +446,11 @@ class PipelineService:
                 {
                     "venues": str(venue_path),
                     "screened": str(screened_path),
+                    **(
+                        {"title_screened": str(title_input)}
+                        if title_result is not None
+                        else {}
+                    ),
                     "enriched": str(enriched_path),
                 }
             )
@@ -384,6 +458,10 @@ class PipelineService:
                 {
                     "deduped_records": len(merged),
                     "manual_records": len(manual_records),
+                    "rule_excluded": screening_result.summary.by_decision.get(
+                        "exclude", 0
+                    ),
+                    **_title_screening_counts(title_result),
                     "abstracts_found": enrichment_result.summary.with_abstract,
                     "abstracts_attempted": enrichment_result.summary.attempted,
                 }
@@ -547,9 +625,15 @@ class PipelineService:
         max_forward_per_seed: int = 30,
         enrich_limit: int | None = None,
         core_online: bool = True,
+        use_title_llm: bool = False,
+        title_batch_size: int = 100,
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
+        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
+            "OPENAI_API_KEY"
+        ):
+            raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
         completed_rounds = [item for item in state["rounds"] if item.get("files", {}).get("audit")]
         if not completed_rounds:
             raise RuntimeError("Complete the initial review before snowballing.")
@@ -577,6 +661,12 @@ class PipelineService:
         round_state["counts"]["seeds"] = len(seed_result.seeds)
         state["rounds"].append(round_state)
         state["status"] = "running_snowball"
+        state.setdefault("options", {}).update(
+            {
+                "title_llm_enabled": use_title_llm,
+                "title_llm_batch_size": title_batch_size,
+            }
+        )
         self._save_state(project_slug, state)
 
         config = load_config(self.store.config_path(project_slug))
@@ -588,7 +678,7 @@ class PipelineService:
             state,
             operation="Citation snowballing",
             heading="Running citation snowballing",
-            stages=SNOWBALL_STAGES,
+            stages=_with_title_screening_stage(SNOWBALL_STAGES, use_title_llm),
             callback=progress,
             paper_count=_csv_row_count(previous_pool),
         )
@@ -622,15 +712,43 @@ class PipelineService:
 
             _notify(
                 tracked_progress,
+                "Rule screening",
+                "Applying project exclusion terms to new records.",
+            )
+            screened_path = processed_dir / f"candidate_papers_screened_round_{round_index}.csv"
+            screening_result = screen_candidates(snowball_path, screened_path, config.screening)
+
+            title_input, title_result = self._title_prescreen(
+                project_slug,
+                screened_path,
+                processed_dir / f"candidate_papers_title_screened_round_{round_index}.csv",
+                enabled=use_title_llm,
+                batch_size=title_batch_size,
+                progress=tracked_progress,
+            )
+            round_state["counts"].update(
+                {
+                    "pool_rows": snowball_result.summary.output_rows,
+                    "rule_excluded": screening_result.summary.by_decision.get(
+                        "exclude", 0
+                    ),
+                    **_title_screening_counts(title_result),
+                }
+            )
+            self._save_state(project_slug, state)
+
+            _notify(
+                tracked_progress,
                 "Venue enrichment",
                 "Updating publication metadata for the expanded pool.",
             )
             venue_path = processed_dir / f"candidate_papers_venues_round_{round_index}.csv"
             venue_config = replace(config.venue_quality, core_online_enabled=core_online)
             venue_result = enrich_venue_quality(
-                snowball_path,
+                title_input,
                 venue_path,
                 venue_config,
+                decisions={"include_candidate", "needs_review"},
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Venue enrichment",
@@ -644,20 +762,12 @@ class PipelineService:
 
             _notify(
                 tracked_progress,
-                "Rule screening",
-                "Applying project exclusion terms to new records.",
-            )
-            screened_path = processed_dir / f"candidate_papers_screened_round_{round_index}.csv"
-            screen_candidates(venue_path, screened_path, config.screening)
-
-            _notify(
-                tracked_progress,
                 "Abstract enrichment",
                 "Looking up abstracts for newly discovered papers.",
             )
             enriched_path = processed_dir / f"candidate_papers_enriched_round_{round_index}.csv"
             enrichment_result = enrich_candidates(
-                screened_path,
+                venue_path,
                 enriched_path,
                 config.enrichment,
                 decisions={"include_candidate", "needs_review"},
@@ -676,8 +786,13 @@ class PipelineService:
             round_state["status"] = "discovery_complete"
             round_state["files"] = {
                 "snowballed": str(snowball_path),
-                "venues": str(venue_path),
                 "screened": str(screened_path),
+                **(
+                    {"title_screened": str(title_input)}
+                    if title_result is not None
+                    else {}
+                ),
+                "venues": str(venue_path),
                 "enriched": str(enriched_path),
                 "seeds": str(seed_path),
             }
@@ -686,7 +801,12 @@ class PipelineService:
                     "pool_rows": snowball_result.summary.output_rows,
                     "added_rows": snowball_result.summary.added_rows,
                     "resolved_seeds": snowball_result.summary.seeds_resolved,
+                    "rule_excluded": screening_result.summary.by_decision.get(
+                        "exclude", 0
+                    ),
+                    **_title_screening_counts(title_result),
                     "abstracts_found": enrichment_result.summary.with_abstract,
+                    "abstracts_attempted": enrichment_result.summary.attempted,
                 }
             )
             state["status"] = "awaiting_ai_or_review"
@@ -706,6 +826,59 @@ class PipelineService:
         except Exception as exc:
             self._mark_failed(project_slug, state, round_state, exc)
             raise
+
+    def _title_prescreen(
+        self,
+        project_slug: str,
+        input_path: Path,
+        output_path: Path,
+        *,
+        enabled: bool,
+        batch_size: int,
+        progress: ProgressCallback | None,
+    ) -> tuple[Path, TitleScreeningResult | None]:
+        if not enabled:
+            return input_path, None
+        settings = self.store.load_project(project_slug)
+        api_key = self.store.read_api_key(project_slug) or os.environ.get(
+            "OPENAI_API_KEY", ""
+        )
+        if not api_key:
+            raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
+        _notify(
+            progress,
+            "AI title screening",
+            "Screening titles in high-recall batches before abstract enrichment.",
+        )
+        client = OpenAIResearchClient(
+            base_url=settings.llm_base_url,
+            api_key=api_key,
+            model=settings.llm_model,
+            timeout_seconds=30,
+            retries=3,
+        )
+        result = screen_titles_with_llm(
+            input_path,
+            output_path,
+            client=client,
+            research_question=settings.research_question,
+            scope_description=settings.scope_description,
+            inclusion_criteria=settings.inclusion_criteria,
+            exclusion_criteria=settings.exclusion_criteria,
+            model=settings.llm_model,
+            cache_dir=self.store.project_dir(project_slug) / "cache" / "title_screening",
+            batch_size=batch_size,
+            progress_callback=_item_progress(
+                progress,
+                "AI title screening",
+                "Screening titles in high-recall batches before abstract enrichment.",
+            ),
+        )
+        write_title_screening_summary(
+            result.summary,
+            output_path.with_name(f"{output_path.stem}_summary.json"),
+        )
+        return output_path, result
 
     def estimate_llm_usage(self, project_slug: str, round_index: int) -> dict[str, int]:
         state = self.load_current_state(project_slug)
@@ -1151,6 +1324,26 @@ def _counted_item_progress(
 
 def _set_progress_paper_count(state: dict[str, Any], paper_count: int) -> None:
     state.setdefault("progress", {})["paper_count"] = max(int(paper_count), 0)
+
+
+def _with_title_screening_stage(stages: list[str], enabled: bool) -> list[str]:
+    values = list(stages)
+    if enabled:
+        rule_index = values.index("Rule screening")
+        values.insert(rule_index + 1, "AI title screening")
+    return values
+
+
+def _title_screening_counts(result: TitleScreeningResult | None) -> dict[str, int]:
+    if result is None:
+        return {}
+    return {
+        "title_screened": result.summary.eligible,
+        "title_excluded": result.summary.excluded,
+        "title_kept": result.summary.kept_for_enrichment,
+        "title_screening_batches": result.summary.batches,
+        "title_screening_cached": result.summary.cached,
+    }
 
 
 def _without_manual_provenance(record: PaperRecord) -> PaperRecord | None:

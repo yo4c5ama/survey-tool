@@ -29,9 +29,19 @@ class AuditSummary:
 def create_manual_recommendations(input_path: Path, output_path: Path) -> int:
     fieldnames, rows = read_csv(input_path)
     for row in rows:
-        row["final_recommendation"] = "manual_review"
-        row["final_priority"] = "3"
-        row["final_reason"] = "No LLM screening was requested; human review is required."
+        if row.get("auto_screening_decision") == "exclude":
+            row["final_recommendation"] = "auto_exclude"
+            row["final_priority"] = "8"
+            row["final_reason"] = (
+                row.get("auto_screening_reason")
+                or "The preliminary screening stage excluded this paper."
+            )
+        else:
+            row["final_recommendation"] = "manual_review"
+            row["final_priority"] = "3"
+            row["final_reason"] = (
+                "No abstract LLM screening was requested; human review is required."
+            )
     write_csv(
         output_path,
         rows,

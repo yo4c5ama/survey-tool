@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Event, Lock
+from time import sleep
 from typing import Any
 
 
@@ -27,6 +28,17 @@ def cancellation_requested() -> bool:
 def raise_if_cancelled() -> None:
     if cancellation_requested():
         raise TaskCancelled("Run stopped by user.")
+
+
+def cancellable_sleep(seconds: float) -> None:
+    """Wait for a rate limit or retry delay while remaining cancellable."""
+
+    delay = max(float(seconds), 0.0)
+    event = _CANCEL_EVENT.get()
+    if event is None:
+        sleep(delay)
+    elif event.wait(delay):
+        raise_if_cancelled()
 
 
 @dataclass(frozen=True, slots=True)

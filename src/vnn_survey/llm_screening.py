@@ -4,7 +4,6 @@ import csv
 import hashlib
 import json
 import os
-import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from typing import Any
 
 import requests
 
+from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
 from vnn_survey.config import LlmScreeningConfig
 from vnn_survey.models import normalize_title
 
@@ -316,11 +316,13 @@ class OpenAIResponsesClient:
         url = f"{self.config.base_url.rstrip('/')}/responses"
         for attempt in range(1, self.config.retries + 1):
             try:
+                raise_if_cancelled()
                 response = self.session.post(
                     url,
                     json=payload,
                     timeout=self.config.timeout_seconds,
                 )
+                raise_if_cancelled()
                 if response.status_code == 429 and attempt < self.config.retries:
                     retry_after = response.headers.get("Retry-After")
                     sleep_seconds = (
@@ -328,15 +330,15 @@ class OpenAIResponsesClient:
                         if retry_after
                         else self.config.request_delay_seconds * attempt * 4
                     )
-                    time.sleep(sleep_seconds)
+                    cancellable_sleep(sleep_seconds)
                     continue
                 response.raise_for_status()
-                time.sleep(self.config.request_delay_seconds)
+                cancellable_sleep(self.config.request_delay_seconds)
                 return response.json()
             except (requests.RequestException, ValueError) as exc:
                 last_error = exc
                 if attempt < self.config.retries:
-                    time.sleep(self.config.request_delay_seconds * attempt)
+                    cancellable_sleep(self.config.request_delay_seconds * attempt)
         raise RuntimeError("OpenAI Responses API request failed") from last_error
 
     def _cache_path(self, row: dict[str, str]) -> Path | None:

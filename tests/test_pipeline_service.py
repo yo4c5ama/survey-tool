@@ -1,13 +1,19 @@
 import csv
 import json
+import shutil
+from collections import Counter
 from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
+from types import SimpleNamespace
 
 from vnn_survey.ai_research import CorpusAnalysisResult
 from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
 from vnn_survey.app.task_manager import TaskManager, raise_if_cancelled
+from vnn_survey.models import PaperRecord
+from vnn_survey.pipeline import CollectionResult
+from vnn_survey.title_screening import TitleScreeningResult, TitleScreeningSummary
 
 
 def test_human_only_round_preparation_and_export(tmp_path: Path) -> None:
@@ -244,3 +250,109 @@ def test_cancelled_discovery_is_persisted_without_becoming_a_failure(
         assert not state["rounds"][0]["error"]
     finally:
         manager.shutdown()
+
+
+def test_initial_discovery_uses_title_decisions_before_abstract_enrichment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
+    project = store.create_project(
+        name="Title Pipeline",
+        research_question="Which papers?",
+        scope_description="A test scope.",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["transformer verification"])],
+    )
+    store.save_api_key(project.slug, "test-key")
+    service = PipelineService(store)
+    records = [
+        PaperRecord(title="Keep", source="test", query="query", year=2025),
+        PaperRecord(title="Exclude", source="test", query="query", year=2024),
+    ]
+    collection = CollectionResult(records, records, records, {}, {})
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.collect_from_sources",
+        lambda *_args, **_kwargs: collection,
+    )
+
+    def fake_title_prescreen(
+        _self,
+        _project_slug,
+        input_path,
+        output_path,
+        **_kwargs,
+    ):
+        with input_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields = list(reader.fieldnames or [])
+            rows = [dict(row) for row in reader]
+        rows[0]["title_llm_decision"] = "include"
+        rows[1]["title_llm_decision"] = "exclude"
+        rows[1]["auto_screening_decision"] = "exclude"
+        fields.append("title_llm_decision")
+        with output_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        summary = TitleScreeningSummary(
+            total=2,
+            eligible=2,
+            api_screened=2,
+            cached=0,
+            batches=1,
+            by_decision=Counter({"include": 1, "exclude": 1}),
+        )
+        return output_path, TitleScreeningResult(rows, summary)
+
+    monkeypatch.setattr(PipelineService, "_title_prescreen", fake_title_prescreen)
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.write_venue_quality_summary",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.write_enrichment_summary",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_venue(input_path, output_path, *_args, **_kwargs):
+        assert input_path.name == "candidate_papers_title_screened.csv"
+        shutil.copyfile(input_path, output_path)
+        return SimpleNamespace(summary=object())
+
+    attempted: list[str] = []
+
+    def fake_enrichment(input_path, output_path, *_args, **_kwargs):
+        assert input_path.name == "candidate_papers_venues.csv"
+        with input_path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        attempted.extend(
+            row["title"]
+            for row in rows
+            if row["auto_screening_decision"] != "exclude"
+        )
+        shutil.copyfile(input_path, output_path)
+        return SimpleNamespace(
+            summary=SimpleNamespace(with_abstract=1, attempted=len(attempted))
+        )
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.enrich_venue_quality",
+        fake_venue,
+    )
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.enrich_candidates",
+        fake_enrichment,
+    )
+
+    state = service.start_initial_discovery(
+        project.slug,
+        source_ids=["dblp"],
+        use_title_llm=True,
+        core_online=False,
+    )
+
+    assert attempted == ["Keep"]
+    assert state["rounds"][0]["counts"]["title_excluded"] == 1
+    assert state["rounds"][0]["counts"]["abstracts_attempted"] == 1

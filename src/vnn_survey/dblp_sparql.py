@@ -3,15 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
 from pathlib import Path
 from typing import Any
 
 import requests
 
+from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
 from vnn_survey.config import DblpConfig
 from vnn_survey.models import PaperRecord
-
 
 DBLP_SPARQL_URL = "https://sparql.dblp.org/sparql"
 
@@ -50,7 +49,7 @@ class DblpSparqlClient:
             records.extend(_parse_binding(binding, query=query) for binding in bindings)
             if len(bindings) < self.config.hits_per_page:
                 break
-            time.sleep(self.config.request_delay_seconds)
+            cancellable_sleep(self.config.request_delay_seconds)
         return records
 
     def _request(self, query: str, sparql_query: str, offset: int) -> dict[str, Any]:
@@ -61,6 +60,7 @@ class DblpSparqlClient:
         last_error: Exception | None = None
         for attempt in range(1, self.config.retries + 1):
             try:
+                raise_if_cancelled()
                 response = self.session.post(
                     DBLP_SPARQL_URL,
                     data=sparql_query.encode("utf-8"),
@@ -70,6 +70,7 @@ class DblpSparqlClient:
                     },
                     timeout=self.config.timeout_seconds,
                 )
+                raise_if_cancelled()
                 response.raise_for_status()
                 payload = response.json()
                 if cache_path:
@@ -79,7 +80,7 @@ class DblpSparqlClient:
             except (requests.RequestException, ValueError) as exc:
                 last_error = exc
                 if attempt < self.config.retries:
-                    time.sleep(self.config.request_delay_seconds * attempt)
+                    cancellable_sleep(self.config.request_delay_seconds * attempt)
         raise RuntimeError(
             f"DBLP SPARQL request failed for query={query!r}, offset={offset}"
         ) from last_error

@@ -1,7 +1,7 @@
 from threading import Event
 from time import monotonic, sleep
 
-from vnn_survey.app.task_manager import TaskManager, raise_if_cancelled
+from vnn_survey.app.task_manager import TaskManager, cancellable_sleep, raise_if_cancelled
 
 
 def test_task_manager_keeps_one_background_task_per_project() -> None:
@@ -76,5 +76,26 @@ def test_task_manager_cancels_and_restarts_last_task() -> None:
         assert not restarted.cancelled
         assert restarted.error == ""
         assert calls == 2
+    finally:
+        manager.shutdown()
+
+
+def test_cancellation_interrupts_retry_waits() -> None:
+    manager = TaskManager(max_workers=1)
+    started = Event()
+
+    def work() -> None:
+        started.set()
+        cancellable_sleep(30)
+
+    try:
+        assert manager.start("project", "waiting", work)
+        assert started.wait(timeout=2)
+        cancel_started = monotonic()
+        assert manager.cancel("project")
+        while manager.is_running("project") and monotonic() - cancel_started < 2:
+            sleep(0.01)
+        assert not manager.is_running("project")
+        assert monotonic() - cancel_started < 1
     finally:
         manager.shutdown()

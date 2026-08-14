@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import re
-import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -14,6 +13,7 @@ from typing import Any, Protocol
 
 import requests
 
+from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
 from vnn_survey.config import DiscoveryConfig, SurveyConfig, YearRange
 from vnn_survey.dblp import DblpClient
 from vnn_survey.dblp_sparql import DblpSparqlClient
@@ -114,7 +114,7 @@ class OpenAlexProvider:
                 return SourceSearchResult(records[:limit])
             if len(items) < per_page:
                 break
-            time.sleep(self.config.request_delay_seconds)
+            cancellable_sleep(self.config.request_delay_seconds)
         return SourceSearchResult(records)
 
 
@@ -157,7 +157,7 @@ class CrossrefProvider:
                 return SourceSearchResult(records[:limit])
             if len(items) < per_page:
                 break
-            time.sleep(self.config.request_delay_seconds)
+            cancellable_sleep(self.config.request_delay_seconds)
         return SourceSearchResult(records)
 
 
@@ -196,7 +196,7 @@ class ArxivProvider:
                 return SourceSearchResult(records[:limit])
             if len(items) < per_page:
                 break
-            time.sleep(self.config.arxiv_request_delay_seconds)
+            cancellable_sleep(self.config.arxiv_request_delay_seconds)
         return SourceSearchResult(records)
 
 
@@ -256,7 +256,7 @@ class PubmedProvider:
                 return SourceSearchResult(records[:limit])
             if len(identifiers) < per_page:
                 break
-            time.sleep(_pubmed_delay(self.config, bool(api_key)))
+            cancellable_sleep(_pubmed_delay(self.config, bool(api_key)))
         return SourceSearchResult(records)
 
 
@@ -460,7 +460,9 @@ def _request_json(
     last_error: Exception | None = None
     for attempt in range(1, config.retries + 1):
         try:
+            raise_if_cancelled()
             response = session.get(url, params=params, timeout=config.timeout_seconds)
+            raise_if_cancelled()
             response.raise_for_status()
             payload = response.json()
             if cache_path:
@@ -470,7 +472,7 @@ def _request_json(
         except (requests.RequestException, ValueError) as exc:
             last_error = exc
             if attempt < config.retries:
-                time.sleep(config.request_delay_seconds * attempt)
+                cancellable_sleep(config.request_delay_seconds * attempt)
     raise RuntimeError(f"{namespace} request failed") from last_error
 
 
@@ -489,7 +491,9 @@ def _request_text(
     last_error: Exception | None = None
     for attempt in range(1, config.retries + 1):
         try:
+            raise_if_cancelled()
             response = session.get(url, params=params, timeout=config.timeout_seconds)
+            raise_if_cancelled()
             response.raise_for_status()
             payload = response.text
             if cache_path:
@@ -499,7 +503,7 @@ def _request_text(
         except requests.RequestException as exc:
             last_error = exc
             if attempt < config.retries:
-                time.sleep(config.request_delay_seconds * attempt)
+                cancellable_sleep(config.request_delay_seconds * attempt)
     raise RuntimeError(f"{namespace} request failed") from last_error
 
 

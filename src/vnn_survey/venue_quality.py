@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 
 import requests
 
+from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
 from vnn_survey.config import VenueQualityConfig
 
 ItemProgressCallback = Callable[[int, int, str], None]
@@ -87,6 +88,7 @@ def enrich_venue_quality(
     input_path: Path,
     output_path: Path,
     config: VenueQualityConfig,
+    decisions: set[str] | None = None,
     progress_callback: ItemProgressCallback | None = None,
 ) -> VenueQualityResult:
     with input_path.open("r", encoding="utf-8", newline="") as handle:
@@ -96,12 +98,30 @@ def enrich_venue_quality(
 
     lookup = VenueLookup(config)
     enriched_rows: list[dict[str, str]] = []
+    eligible_total = sum(
+        decisions is None
+        or "auto_screening_decision" not in row
+        or row.get("auto_screening_decision") in decisions
+        for row in rows
+    )
+    completed = 0
     if progress_callback:
-        progress_callback(0, len(rows), "")
-    for index, row in enumerate(rows, start=1):
-        enriched_rows.append(_annotate_row(row, lookup=lookup))
-        if progress_callback:
-            progress_callback(index, len(rows), row.get("title", ""))
+        progress_callback(0, eligible_total, "")
+    for row in rows:
+        if (
+            decisions is not None
+            and "auto_screening_decision" in row
+            and row.get("auto_screening_decision") not in decisions
+        ):
+            annotated = dict(row)
+            for field in VENUE_QUALITY_FIELDS:
+                annotated.setdefault(field, "")
+            enriched_rows.append(annotated)
+        else:
+            enriched_rows.append(_annotate_row(row, lookup=lookup))
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, eligible_total, row.get("title", ""))
     write_venue_quality_csv(enriched_rows, input_fields, output_path)
     return VenueQualityResult(rows=enriched_rows, summary=summarize_venue_quality(enriched_rows))
 
@@ -351,10 +371,12 @@ class CorePortalClient:
             "sort": "atitle",
             "source": "all",
         }
+        raise_if_cancelled()
         response = self.session.get(
             f"{CORE_CONF_RANKS_URL}?{urlencode(params)}",
             timeout=self.timeout,
         )
+        raise_if_cancelled()
         response.raise_for_status()
         self._last_request_at = time.monotonic()
         rows = _parse_core_rows(response.text)
@@ -367,7 +389,7 @@ class CorePortalClient:
     def _sleep_if_needed(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
         if elapsed < self.request_delay_seconds:
-            time.sleep(self.request_delay_seconds - elapsed)
+            cancellable_sleep(self.request_delay_seconds - elapsed)
 
     def _cache_path(self, query: str) -> Path | None:
         if not self.cache_dir:

@@ -2,6 +2,34 @@
 
 [English](#english) | [中文](#中文) | [日本語](#日本語) | [한국어](#한국어)
 
+## Workflow
+
+AI screening is optional and produces recommendations only. A human reviewer
+makes the final inclusion decision in every discovery and snowballing round.
+
+```mermaid
+flowchart TD
+    A["Define the research scope<br/>Question, years, keywords, and sources"] --> B["Search selected literature sources"]
+    B --> C["Normalize and deduplicate records"]
+    P["Add known papers manually"] --> C
+    C --> E["Apply rule-based title exclusions"]
+    E --> T{"Use batched AI title prescreen?"}
+    T -- Yes --> U["Keep relevant or ambiguous titles<br/>and cache every title decision"]
+    T -- No --> D["Enrich venue rank, IF, and abstracts"]
+    U --> D
+    D --> F{"Use abstract-level AI screening?"}
+    F -- Yes --> G["Generate LLM recommendations<br/>from titles and abstracts"]
+    F -- No --> H["Create the review queue"]
+    G --> H
+    H --> I["Human audit<br/>Include, related, or exclude"]
+    I --> J{"Run citation snowballing?"}
+    J -- Yes --> K["Collect references and citing works<br/>from included papers"]
+    K --> C
+    J -- "No or converged" --> L["Export the final corpus<br/>with its audit trail"]
+    L --> M["Ask questions about selected PDFs<br/>with saved conversation memory"]
+    L --> N["Design a taxonomy and<br/>classify the final corpus"]
+```
+
 ## English
 
 SurveyFlow is a local graphical tool for literature discovery, abstract
@@ -49,8 +77,10 @@ docker compose down
 3. On **Scope**, adjust the source multi-select and check the Boolean query preview.
 4. Optionally add an OpenAI API key on **AI settings** and choose separate models
    for screening, paper Q&A, and corpus classification.
-5. Start retrieval on **Run center**. The background run, paper count, and progress
-   remain visible after you leave the page and return.
+5. Start retrieval on **Run center**. Optionally enable the high-recall, batched AI
+   title prescreen so clearly irrelevant papers are removed before venue and abstract
+   enrichment. The background run, screening counts, paper count, and progress remain
+   visible after you leave the page and return.
 6. On **Add papers**, search a known title or enter its metadata manually. Synchronize
    additions before creating the review queue.
 7. Prepare the round with AI screening or human-only screening.
@@ -120,7 +150,8 @@ docker compose down
 3. 在**研究范围**页面调整数据源多选并检查布尔查询逻辑。
 4. 如需 AI 功能，在 **AI 设置**中填写 OpenAI API 密钥，并分别选择筛选、论文问答和
    文献集分类模型。
-5. 在**运行中心**开始检索。任务会在后台继续，离开页面后再次返回仍可查看当前阶段、
+5. 在**运行中心**开始检索。可以启用高召回、批处理的 AI 标题预筛，在场地和摘要补全前
+   排除明确无关的论文。任务会在后台继续，离开页面后再次返回仍可查看当前阶段、筛选数量、
    进度和已收集论文数量。
 6. 在**添加论文**中按标题查找已知论文，或手工填写元数据；建立审阅队列前同步补录结果。
 7. 选择 AI 辅助筛选或仅人工筛选，生成审阅队列。
@@ -188,8 +219,9 @@ docker compose down
 3. **研究範囲**ページでデータソースの複数選択を調整し、ブール検索式を確認します。
 4. AI 機能を利用する場合は、**AI 設定**で OpenAI API キーを入力し、スクリーニング、
    論文 Q&A、コーパス分類に使用するモデルを個別に選択します。
-5. **実行センター**で検索を開始します。他のページへ移動して戻っても、バックグラウンド
-   実行、現在の工程、進捗、収集済み論文数を確認できます。
+5. **実行センター**で検索を開始します。高再現率のバッチ AI タイトル予備選別を有効にすると、
+   会場情報と抄録の補完前に明らかに無関係な論文を除外できます。他のページへ移動して戻っても、
+   バックグラウンド実行、選別件数、現在の工程、進捗、収集済み論文数を確認できます。
 6. **論文を追加**で既知のタイトルを検索するか、メタデータを手動入力します。
    レビュー待ち行列を作成する前に追加内容を同期してください。
 7. AI 支援または手動のみのスクリーニングを選択し、レビュー待ち行列を作成します。
@@ -260,8 +292,9 @@ docker compose down
 3. **연구 범위** 페이지에서 데이터 소스 다중 선택을 조정하고 불리언 검색식을 확인합니다.
 4. AI 기능이 필요하면 **AI 설정**에서 OpenAI API 키를 입력하고 선별, 논문 Q&A,
    문헌 집합 분류에 사용할 모델을 각각 선택합니다.
-5. **실행 센터**에서 검색을 시작합니다. 다른 페이지에 다녀와도 백그라운드 실행,
-   현재 단계, 진행률과 수집된 논문 수를 계속 확인할 수 있습니다.
+5. **실행 센터**에서 검색을 시작합니다. 고재현율 배치 AI 제목 사전 선별을 사용하면
+   학술지/학회 정보와 초록 보강 전에 명확히 관련 없는 논문을 제외할 수 있습니다. 다른 페이지에
+   다녀와도 백그라운드 실행, 선별 수, 현재 단계, 진행률과 수집된 논문 수를 계속 확인할 수 있습니다.
 6. **논문 추가**에서 알고 있는 제목을 검색하거나 메타데이터를 직접 입력합니다. 검토
    대기열을 만들기 전에 추가 항목을 동기화하세요.
 7. AI 보조 또는 수동 전용 선별을 선택하여 검토 대기열을 만듭니다.

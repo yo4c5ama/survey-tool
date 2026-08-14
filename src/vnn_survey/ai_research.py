@@ -5,7 +5,6 @@ import hashlib
 import json
 import math
 import os
-import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ from typing import Any
 
 import requests
 
+from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
 from vnn_survey.models import normalize_title
 
 CorpusProgressCallback = Callable[[int, int, str], None]
@@ -330,13 +330,17 @@ class OpenAIResearchClient:
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             try:
+                raise_if_cancelled()
                 response = self.session.post(
                     f"{self.base_url}/responses",
                     json=payload,
                     timeout=self.timeout_seconds,
                 )
+                raise_if_cancelled()
                 if response.status_code == 429 and attempt < self.retries:
-                    time.sleep(float(response.headers.get("Retry-After") or attempt * 2))
+                    cancellable_sleep(
+                        float(response.headers.get("Retry-After") or attempt * 2)
+                    )
                     continue
                 response.raise_for_status()
                 return response.json()
@@ -346,7 +350,7 @@ class OpenAIResearchClient:
                     if exc.response.status_code == 400:
                         raise
                 if attempt < self.retries:
-                    time.sleep(attempt)
+                    cancellable_sleep(attempt)
         raise RuntimeError("OpenAI Responses API request failed") from last_error
 
 

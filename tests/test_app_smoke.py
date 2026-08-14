@@ -269,3 +269,44 @@ def test_ai_prompt_can_be_regenerated_after_widget_is_created(
     expected = store.system_prompt_path(project.slug).read_text(encoding="utf-8")
     assert prompt.value.rstrip("\n") == expected.rstrip("\n")
     assert prompt.value != "A temporary custom prompt"
+
+
+def test_run_center_offers_title_prescreen_when_api_key_is_saved(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    secrets_root = tmp_path / "secrets"
+    monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
+    monkeypatch.setenv("VNN_SURVEY_APP_SECRETS", str(secrets_root))
+    store = ProjectStore(projects_root, secrets_root)
+    project = store.create_project(
+        name="Title Prescreen UI",
+        research_question="Which papers?",
+        scope_description="Test scope",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    store.save_api_key(project.slug, "test-key")
+    st.cache_resource.clear()
+
+    app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    workspace = next(item for item in app.radio if item.key == "workspace_page")
+    workspace.set_value("run_center")
+    app.run(timeout=20)
+
+    title_toggle = next(
+        item
+        for item in app.toggle
+        if item.key == f"title_llm_{project.slug}_False"
+    )
+    batch_size = next(
+        item
+        for item in app.number_input
+        if item.key == f"title_batch_{project.slug}_False"
+    )
+    assert not app.exception
+    assert title_toggle.value is True
+    assert batch_size.value == 100

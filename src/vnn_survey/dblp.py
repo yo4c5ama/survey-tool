@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from typing import Any
 
 import requests
 
+from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
 from vnn_survey.config import DblpConfig
 from vnn_survey.models import PaperRecord
-
 
 DBLP_API_URL = "https://dblp.org/search/publ/api"
 
@@ -36,7 +35,7 @@ class DblpClient:
             records.extend(_parse_hit(hit, query=query) for hit in hits)
             if len(hits) < self.config.hits_per_page:
                 break
-            time.sleep(self.config.request_delay_seconds)
+            cancellable_sleep(self.config.request_delay_seconds)
         return records
 
     def _request_page(self, query: str, offset: int) -> dict[str, Any]:
@@ -54,7 +53,13 @@ class DblpClient:
         last_error: Exception | None = None
         for attempt in range(1, self.config.retries + 1):
             try:
-                response = self.session.get(DBLP_API_URL, params=params, timeout=self.config.timeout_seconds)
+                raise_if_cancelled()
+                response = self.session.get(
+                    DBLP_API_URL,
+                    params=params,
+                    timeout=self.config.timeout_seconds,
+                )
+                raise_if_cancelled()
                 response.raise_for_status()
                 payload = response.json()
                 if cache_path:
@@ -64,8 +69,10 @@ class DblpClient:
             except (requests.RequestException, ValueError) as exc:
                 last_error = exc
                 if attempt < self.config.retries:
-                    time.sleep(self.config.request_delay_seconds * attempt)
-        raise RuntimeError(f"DBLP request failed for query={query!r}, offset={offset}") from last_error
+                    cancellable_sleep(self.config.request_delay_seconds * attempt)
+        raise RuntimeError(
+            f"DBLP request failed for query={query!r}, offset={offset}"
+        ) from last_error
 
     def _cache_path(self, query: str, offset: int):
         if not self.config.cache_dir:

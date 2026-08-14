@@ -4,7 +4,6 @@ import csv
 import hashlib
 import json
 import os
-import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from urllib.parse import quote
 import requests
 import yaml
 
+from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
 from vnn_survey.config import SnowballingConfig, SurveyConfig
 from vnn_survey.enrichment import title_similarity
 from vnn_survey.manual_audit import is_manually_excluded
@@ -662,21 +662,23 @@ def _request_json(
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
+            raise_if_cancelled()
             response = session.get(url, params=params, timeout=timeout)
+            raise_if_cancelled()
             if response.status_code == 404:
                 return {"_http_status": 404, "error": "not_found"}
             if response.status_code == 429 and attempt < retries:
                 retry_after = response.headers.get("Retry-After")
                 sleep_seconds = float(retry_after) if retry_after else delay * attempt * 2
-                time.sleep(sleep_seconds)
+                cancellable_sleep(sleep_seconds)
                 continue
             response.raise_for_status()
-            time.sleep(delay)
+            cancellable_sleep(delay)
             return response.json()
         except (requests.RequestException, ValueError) as exc:
             last_error = exc
             if attempt < retries:
-                time.sleep(delay * attempt)
+                cancellable_sleep(delay * attempt)
     raise RuntimeError(f"OpenAlex snowball request failed: {url}") from last_error
 
 

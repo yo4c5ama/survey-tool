@@ -4,6 +4,7 @@ from pathlib import Path
 from vnn_survey.app.audit import (
     build_cumulative_audit,
     create_audit_queue,
+    create_manual_recommendations,
     load_audit,
     update_audit_rows,
 )
@@ -59,3 +60,33 @@ def test_audit_queue_update_and_cumulative_export(tmp_path: Path) -> None:
     assert (total, unique, kept) == (1, 1, 1)
     _, rows, _ = load_audit(included)
     assert rows[0]["title"] == "Keep Me"
+
+
+def test_human_only_queue_respects_preliminary_exclusions(tmp_path: Path) -> None:
+    screened = tmp_path / "screened.csv"
+    with screened.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["title", "year", "auto_screening_decision"],
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "title": "Keep for Human Review",
+                    "year": "2025",
+                    "auto_screening_decision": "include_candidate",
+                },
+                {
+                    "title": "Excluded by Title Prescreen",
+                    "year": "2024",
+                    "auto_screening_decision": "exclude",
+                },
+            ]
+        )
+
+    recommendations = tmp_path / "recommendations.csv"
+    create_manual_recommendations(screened, recommendations)
+    _, queued = create_audit_queue(recommendations, tmp_path / "audit.csv")
+
+    assert queued == 1

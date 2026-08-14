@@ -651,6 +651,33 @@ def _initial_discovery_form(
             value=True,
             key=f"core_online_{compact}",
         )
+    has_api_key = service.store.has_api_key(project.slug) or bool(
+        os.environ.get("OPENAI_API_KEY")
+    )
+    title_columns = st.columns([2, 1])
+    with title_columns[0]:
+        use_title_llm = st.toggle(
+            _t("Use AI title prescreen before abstract enrichment"),
+            value=has_api_key,
+            disabled=not has_api_key,
+            key=f"title_llm_{project.slug}_{compact}",
+            help=_t(
+                "Titles are screened in high-recall batches. Ambiguous papers are kept for "
+                "abstract enrichment."
+            ),
+        )
+    with title_columns[1]:
+        title_batch_size = st.number_input(
+            _t("Titles per AI batch"),
+            min_value=10,
+            max_value=200,
+            value=100,
+            step=10,
+            disabled=not use_title_llm,
+            key=f"title_batch_{project.slug}_{compact}",
+        )
+    if not has_api_key:
+        st.caption(_t("Add an API key on AI settings to enable title prescreening."))
     if st.button(
         _t("Run initial discovery"),
         type="primary",
@@ -668,6 +695,8 @@ def _initial_discovery_form(
             limit_queries=_none_if_zero(query_limit),
             enrich_limit=_none_if_zero(abstract_limit),
             core_online=core_online,
+            use_title_llm=use_title_llm,
+            title_batch_size=int(title_batch_size),
         )
         if started:
             st.rerun()
@@ -1168,6 +1197,28 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
         value=True,
         key=f"snowball_core_online_{state['run_id']}",
     )
+    has_api_key = service.store.has_api_key(project.slug) or bool(
+        os.environ.get("OPENAI_API_KEY")
+    )
+    title_default = bool(state.get("options", {}).get("title_llm_enabled", has_api_key))
+    title_columns = st.columns([2, 1])
+    with title_columns[0]:
+        use_title_llm = st.toggle(
+            _t("Use AI title prescreen before abstract enrichment"),
+            value=title_default and has_api_key,
+            disabled=not has_api_key,
+            key=f"snowball_title_llm_{state['run_id']}",
+        )
+    with title_columns[1]:
+        title_batch_size = st.number_input(
+            _t("Titles per AI batch"),
+            min_value=10,
+            max_value=200,
+            value=int(state.get("options", {}).get("title_llm_batch_size", 100)),
+            step=10,
+            disabled=not use_title_llm,
+            key=f"snowball_title_batch_{state['run_id']}",
+        )
     if st.button(
         _t("Start next snowball round"),
         type="primary",
@@ -1183,6 +1234,8 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             max_forward_per_seed=int(forward),
             enrich_limit=_none_if_zero(abstract_limit),
             core_online=core_online,
+            use_title_llm=use_title_llm,
+            title_batch_size=int(title_batch_size),
         )
         if started:
             st.rerun()
@@ -1576,6 +1629,10 @@ def _render_round_overview(state: dict[str, Any]) -> None:
                 _t("Status"): _state_label(item.get("status", "")),
                 _t("Pool"): counts.get("pool_rows", counts.get("deduped_records", "")),
                 _t("Added"): counts.get("added_rows", ""),
+                _t("Rule excluded"): counts.get("rule_excluded", ""),
+                _t("Title kept"): counts.get("title_kept", ""),
+                _t("Title excluded"): counts.get("title_excluded", ""),
+                _t("Abstract lookups"): counts.get("abstracts_attempted", ""),
                 _t("Review queue"): counts.get("audit_queue", ""),
                 _t("Reviewed"): counts.get("reviewed", ""),
             }
@@ -2015,6 +2072,13 @@ def _apply_styles() -> None:
         <style>
         .block-container {max-width: 1440px; padding-top: 2rem; padding-bottom: 3rem;}
         [data-testid="stMetric"] {border: 1px solid #d8dee8; border-radius: 6px; padding: 14px;}
+        [data-testid="stMetricLabel"] p {font-size: 0.78rem !important; line-height: 1.15;}
+        [data-testid="stMetricValue"] {
+            font-size: 1.15rem !important;
+            line-height: 1.2;
+            overflow-wrap: anywhere;
+        }
+        [data-testid="stMetricValue"] > div {font-size: inherit !important; line-height: inherit;}
         [data-testid="stSidebar"] {border-right: 1px solid #d8dee8;}
         [data-testid="stAppDeployButton"] {display: none;}
         h1, h2, h3, p, label, button {letter-spacing: 0 !important;}
