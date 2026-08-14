@@ -1,10 +1,13 @@
 import csv
 import json
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 
 from vnn_survey.ai_research import CorpusAnalysisResult
 from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
+from vnn_survey.app.task_manager import TaskManager, raise_if_cancelled
 
 
 def test_human_only_round_preparation_and_export(tmp_path: Path) -> None:
@@ -190,3 +193,54 @@ def test_final_corpus_analysis_persists_outputs_and_progress(
     assert Path(analyzed["corpus_analysis"]["report"]).exists()
     assert analyzed["progress"]["status"] == "completed"
     assert analyzed["progress"]["paper_count"] == 1
+
+
+def test_cancelled_discovery_is_persisted_without_becoming_a_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
+    project = store.create_project(
+        name="Cancellation Test",
+        research_question="Which papers?",
+        scope_description="A test scope.",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    service = PipelineService(store)
+    manager = TaskManager(max_workers=1)
+    collecting = Event()
+
+    def wait_for_cancellation(*_args, **_kwargs):
+        collecting.set()
+        while True:
+            raise_if_cancelled()
+            sleep(0.01)
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.collect_from_sources",
+        wait_for_cancellation,
+    )
+
+    try:
+        assert manager.start(
+            project.slug,
+            "initial_discovery",
+            service.start_initial_discovery,
+            project.slug,
+        )
+        assert collecting.wait(timeout=2)
+        assert manager.cancel(project.slug)
+
+        deadline = monotonic() + 2
+        while manager.is_running(project.slug) and monotonic() < deadline:
+            sleep(0.01)
+
+        state = service.load_current_state(project.slug)
+        assert state["status"] == "cancelled"
+        assert state["progress"]["status"] == "cancelled"
+        assert state["rounds"][0]["status"] == "cancelled"
+        assert not state["rounds"][0]["error"]
+    finally:
+        manager.shutdown()

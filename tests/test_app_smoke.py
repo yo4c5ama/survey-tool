@@ -226,3 +226,46 @@ def test_run_center_restores_saved_progress_and_paper_count(monkeypatch, tmp_pat
     paper_metric = next(metric for metric in app.metric if metric.label == "Papers collected")
     assert paper_metric.value == "37"
     assert any("37 papers collected" in item.proto.text for item in app.get("progress"))
+
+
+def test_ai_prompt_can_be_regenerated_after_widget_is_created(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    secrets_root = tmp_path / "secrets"
+    monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
+    monkeypatch.setenv("VNN_SURVEY_APP_SECRETS", str(secrets_root))
+    store = ProjectStore(projects_root, secrets_root)
+    project = store.create_project(
+        name="Prompt reset",
+        research_question="Which papers?",
+        scope_description="Test scope",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    st.cache_resource.clear()
+
+    app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    workspace = next(item for item in app.radio if item.key == "workspace_page")
+    workspace.set_value("ai_settings")
+    app.run(timeout=20)
+
+    prompt = next(
+        item for item in app.text_area if item.key == f"ai_prompt_{project.slug}"
+    )
+    prompt.set_value("A temporary custom prompt")
+    app.run(timeout=20)
+    regenerate = next(item for item in app.button if item.label == "Regenerate from scope")
+    regenerate.click()
+    app.run(timeout=20)
+
+    assert not app.exception
+    prompt = next(
+        item for item in app.text_area if item.key == f"ai_prompt_{project.slug}"
+    )
+    expected = store.system_prompt_path(project.slug).read_text(encoding="utf-8")
+    assert prompt.value.rstrip("\n") == expected.rstrip("\n")
+    assert prompt.value != "A temporary custom prompt"

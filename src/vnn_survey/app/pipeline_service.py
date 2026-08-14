@@ -26,6 +26,7 @@ from vnn_survey.app.audit import (
 )
 from vnn_survey.app.manual_papers import ManualPaperStore
 from vnn_survey.app.project_store import ProjectStore
+from vnn_survey.app.task_manager import TaskCancelled, raise_if_cancelled
 from vnn_survey.config import load_config
 from vnn_survey.enrichment import enrich_candidates, write_enrichment_summary
 from vnn_survey.export import write_csv, write_jsonl
@@ -240,6 +241,9 @@ class PipelineService:
                 paper_count=int(collection_summary["deduped_records"]),
             )
             return state
+        except TaskCancelled:
+            self._mark_cancelled(project_slug, state, round_state)
+            return state
         except Exception as exc:
             self._mark_failed(project_slug, state, round_state, exc)
             raise
@@ -395,6 +399,9 @@ class PipelineService:
                 paper_count=len(merged),
             )
             return state
+        except TaskCancelled:
+            self._mark_cancelled(project_slug, state, initial_round)
+            return state
         except Exception as exc:
             self._mark_failed(project_slug, state, initial_round, exc)
             raise
@@ -524,6 +531,9 @@ class PipelineService:
                 else f"{queue_count} papers require human decisions.",
                 paper_count=_round_paper_count(round_state),
             )
+            return state
+        except TaskCancelled:
+            self._mark_cancelled(project_slug, state, round_state)
             return state
         except Exception as exc:
             self._mark_failed(project_slug, state, round_state, exc)
@@ -690,6 +700,9 @@ class PipelineService:
                 paper_count=snowball_result.summary.output_rows,
             )
             return state
+        except TaskCancelled:
+            self._mark_cancelled(project_slug, state, round_state)
+            return state
         except Exception as exc:
             self._mark_failed(project_slug, state, round_state, exc)
             raise
@@ -847,6 +860,9 @@ class PipelineService:
                 paper_count=len(rows),
             )
             return state
+        except TaskCancelled:
+            self._mark_progress_cancelled(project_slug, state)
+            return state
         except Exception as exc:
             self._mark_progress_failed(project_slug, state, exc)
             raise
@@ -906,6 +922,7 @@ class PipelineService:
             total: int | None,
             current: str,
         ) -> None:
+            raise_if_cancelled()
             progress_state = state["progress"]
             progress_state.update(
                 {
@@ -932,6 +949,7 @@ class PipelineService:
         message: str,
         paper_count: int,
     ) -> None:
+        raise_if_cancelled()
         progress_state = state.get("progress", {})
         progress_state.update(
             {
@@ -964,6 +982,34 @@ class PipelineService:
             {
                 "status": "failed",
                 "message": str(exc),
+                "current": "",
+                "updated_at": _now(),
+            }
+        )
+        state["progress"] = progress_state
+        self._save_state(project_slug, state)
+
+    def _mark_cancelled(
+        self,
+        project_slug: str,
+        state: dict[str, Any],
+        round_state: dict[str, Any],
+    ) -> None:
+        if round_state.get("status") == "running":
+            round_state["status"] = "cancelled"
+        state["status"] = "cancelled"
+        self._mark_progress_cancelled(project_slug, state)
+
+    def _mark_progress_cancelled(
+        self,
+        project_slug: str,
+        state: dict[str, Any],
+    ) -> None:
+        progress_state = state.get("progress", {})
+        progress_state.update(
+            {
+                "status": "cancelled",
+                "message": "Run stopped by user. Completed files have been retained.",
                 "current": "",
                 "updated_at": _now(),
             }

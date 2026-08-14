@@ -520,11 +520,15 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
     st.divider()
     st.subheader(_t("Screening prompt"))
     prompt = store.system_prompt_path(project.slug).read_text(encoding="utf-8")
+    prompt_key = f"ai_prompt_{project.slug}"
+    if st.session_state.pop(f"{prompt_key}_reset_success", False):
+        st.success(_t("Prompt regenerated from the current research scope."))
+    if prompt_key not in st.session_state:
+        st.session_state[prompt_key] = prompt
     edited_prompt = st.text_area(
         _t("System prompt"),
-        value=prompt,
         height=420,
-        key=f"ai_prompt_{project.slug}",
+        key=prompt_key,
     )
     save_col, reset_col = st.columns([1, 1])
     with save_col:
@@ -540,9 +544,17 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
             except ValueError as exc:
                 st.error(_runtime_text(str(exc)))
     with reset_col:
-        if st.button(_t("Regenerate from scope"), width="stretch"):
-            st.session_state[f"ai_prompt_{project.slug}"] = store.reset_system_prompt(project.slug)
-            st.rerun()
+        st.button(
+            _t("Regenerate from scope"),
+            width="stretch",
+            on_click=_reset_ai_prompt,
+            args=(store, project.slug, prompt_key),
+        )
+
+
+def _reset_ai_prompt(store: ProjectStore, project_slug: str, widget_key: str) -> None:
+    st.session_state[widget_key] = store.reset_system_prompt(project_slug)
+    st.session_state[f"{widget_key}_reset_success"] = True
 
 
 def _render_run_center(
@@ -1804,7 +1816,41 @@ def _render_current_run_progress(project_slug: str) -> None:
     )
 
     if task and task.running:
-        st.info(_t("Updating automatically. You can safely visit another page."))
+        if task.cancel_requested:
+            st.button(
+                _t("Stopping..."),
+                icon=":material/progress_activity:",
+                disabled=True,
+                key=f"stop_run_{project_slug}",
+            )
+            st.caption(
+                _t(
+                    "The current item will finish safely before the run stops."
+                )
+            )
+        elif st.button(
+            _t("Stop run"),
+            icon=":material/stop_circle:",
+            type="secondary",
+            key=f"stop_run_{project_slug}",
+        ):
+            _task_manager().cancel(project_slug)
+            st.rerun()
+    elif task and task.can_restart and (task.cancelled or task.error):
+        if st.button(
+            _t("Run again"),
+            icon=":material/replay:",
+            type="primary",
+            key=f"restart_run_{project_slug}",
+        ):
+            if _task_manager().restart(project_slug):
+                st.rerun()
+            else:
+                st.warning(_t("The previous task is still stopping. Please wait."))
+
+    if task and task.running:
+        if not task.cancel_requested:
+            st.info(_t("Updating automatically. You can safely visit another page."))
     elif progress_status == "running":
         st.warning(
             _t(
@@ -1814,6 +1860,8 @@ def _render_current_run_progress(project_slug: str) -> None:
         )
     elif progress_status == "failed":
         st.error(_t("Pipeline failed: {error}", error=_runtime_text(message)))
+    elif progress_status == "cancelled":
+        st.warning(_t("Run stopped. Completed files have been retained."))
 
     marker_key = f"progress_status_{project_slug}_{state.get('run_id', '')}"
     previous_status = st.session_state.get(marker_key)
