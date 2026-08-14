@@ -1,8 +1,10 @@
 import io
+import json
 from pathlib import Path
 
 from rich.console import Console
 
+from vnn_survey import sources
 from vnn_survey.app.manual_papers import ManualPaperStore, create_manual_record
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
 from vnn_survey.config import expand_query_alternatives, load_config
@@ -58,6 +60,64 @@ def test_project_persists_domain_and_sources_in_pipeline_config(tmp_path: Path) 
     assert config.discovery.sources == ["openalex", "crossref"]
     assert project.paper_qa_model
     assert project.corpus_analysis_model
+    assert config.enrichment.providers == [
+        "arxiv",
+        "pubmed",
+        "crossref",
+        "semantic_scholar",
+        "openalex",
+    ]
+    assert config.enrichment.batch_size == 100
+
+
+def test_legacy_project_migrates_abstract_provider_config(tmp_path: Path) -> None:
+    store, slug = _project_store(tmp_path)
+    project_path = store.project_dir(slug) / "project.json"
+    value = json.loads(project_path.read_text(encoding="utf-8"))
+    value.pop("abstract_providers")
+    value.pop("abstract_batch_size")
+    value.pop("scholarly_api_email")
+    project_path.write_text(json.dumps(value), encoding="utf-8")
+
+    project = store.load_project(slug)
+    config = load_config(store.config_path(slug))
+
+    assert project.abstract_providers[0] == "arxiv"
+    assert config.enrichment.providers == project.abstract_providers
+
+
+def test_discovery_parsers_retain_native_abstracts() -> None:
+    arxiv_payload = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>https://arxiv.org/abs/2501.00001v2</id>
+        <published>2025-01-01T00:00:00Z</published>
+        <title>A Formal Transformer</title>
+        <summary>  A sound verification method.  </summary>
+        <author><name>A. Researcher</name></author>
+      </entry>
+    </feed>"""
+    arxiv_record = sources._parse_arxiv_feed(arxiv_payload, "formal transformer")[0]
+
+    pubmed_payload = """<PubmedArticleSet><PubmedArticle>
+      <MedlineCitation><PMID>12345</PMID><Article>
+        <ArticleTitle>A Medical Model</ArticleTitle>
+        <Abstract>
+          <AbstractText Label="BACKGROUND">Context.</AbstractText>
+          <AbstractText Label="METHODS">A verified method.</AbstractText>
+        </Abstract>
+        <Journal><Title>Journal</Title></Journal>
+      </Article></MedlineCitation>
+      <PubmedData><ArticleIdList>
+        <ArticleId IdType="doi">10.1000/test</ArticleId>
+      </ArticleIdList></PubmedData>
+    </PubmedArticle></PubmedArticleSet>"""
+    pubmed_record = sources._parse_pubmed_xml(pubmed_payload, "medical model")[0]
+
+    assert arxiv_record.abstract == "A sound verification method."
+    assert arxiv_record.abstract_source == "arxiv"
+    assert pubmed_record.abstract == "BACKGROUND: Context. METHODS: A verified method."
+    assert pubmed_record.abstract_source == "pubmed"
 
 
 def test_multi_source_collection_merges_duplicate_provenance(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from vnn_survey.app.pipeline_service import (
     test_openai_connection,
 )
 from vnn_survey.app.project_store import KeywordGroup, ProjectSettings, ProjectStore
+from vnn_survey.app.run_flow import build_flow_svg, flow_summary_payload, round_flow_stages
 from vnn_survey.app.task_manager import TaskManager
 from vnn_survey.config import expand_query_alternatives, load_config
 from vnn_survey.models import PaperRecord
@@ -50,6 +52,21 @@ MODEL_SUGGESTIONS = [
     "gpt-4.1",
 ]
 CUSTOM_MODEL_OPTION = "__custom_model__"
+ABSTRACT_PROVIDER_OPTIONS = [
+    "arxiv",
+    "pubmed",
+    "crossref",
+    "semantic_scholar",
+    "openalex",
+]
+ABSTRACT_PROVIDER_LABELS = {
+    "arxiv": "arXiv",
+    "pubmed": "PubMed",
+    "crossref": "Crossref",
+    "semantic_scholar": "Semantic Scholar",
+    "openalex": "OpenAlex",
+    "__disabled__": "Disabled",
+}
 
 
 def main() -> None:
@@ -86,6 +103,19 @@ def main() -> None:
     )
     st.session_state["project_slug"] = selected_slug
     project = store.load_project(selected_slug)
+    saved_openalex_key = store.read_openalex_api_key(project.slug)
+    if saved_openalex_key:
+        os.environ["OPENALEX_API_KEY"] = saved_openalex_key
+    saved_semantic_scholar_key = store.read_semantic_scholar_api_key(project.slug)
+    if saved_semantic_scholar_key:
+        os.environ["SEMANTIC_SCHOLAR_API_KEY"] = saved_semantic_scholar_key
+    saved_ncbi_key = store.read_ncbi_api_key(project.slug)
+    if saved_ncbi_key:
+        os.environ["NCBI_API_KEY"] = saved_ncbi_key
+    if project.scholarly_api_email:
+        os.environ["CROSSREF_EMAIL"] = project.scholarly_api_email
+        os.environ["OPENALEX_EMAIL"] = project.scholarly_api_email
+        os.environ["NCBI_EMAIL"] = project.scholarly_api_email
 
     page = st.sidebar.radio(
         _t("Workspace"),
@@ -473,6 +503,74 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
             st.success(_t("Model settings saved."))
 
     st.divider()
+    st.subheader(_t("Abstract enrichment"))
+    st.caption(
+        _t(
+            "Abstracts already returned by discovery are always used first. Configure the "
+            "fallback providers below; each paper stops after the first successful match."
+        )
+    )
+    provider_options = ["__disabled__", *ABSTRACT_PROVIDER_OPTIONS]
+    provider_values: list[str] = []
+    provider_columns = st.columns(2)
+    for index in range(len(ABSTRACT_PROVIDER_OPTIONS)):
+        current = (
+            project.abstract_providers[index]
+            if index < len(project.abstract_providers)
+            and project.abstract_providers[index] in ABSTRACT_PROVIDER_OPTIONS
+            else "__disabled__"
+        )
+        with provider_columns[index % 2]:
+            provider_values.append(
+                st.selectbox(
+                    _t("Fallback priority {index}", index=index + 1),
+                    provider_options,
+                    index=provider_options.index(current),
+                    format_func=lambda value: _t(ABSTRACT_PROVIDER_LABELS[value]),
+                    key=f"abstract_provider_{index}_{project.slug}",
+                )
+            )
+    batch_size = st.number_input(
+        _t("Maximum identifier batch size"),
+        min_value=1,
+        max_value=500,
+        value=min(max(project.abstract_batch_size, 1), 500),
+        help=_t(
+            "Provider limits are applied automatically: OpenAlex and arXiv use at most 100, "
+            "PubMed 200, and Semantic Scholar 500 identifiers per request."
+        ),
+        key=f"abstract_batch_size_{project.slug}",
+    )
+    scholarly_email = st.text_input(
+        _t("Scholarly API contact email (optional)"),
+        value=project.scholarly_api_email,
+        help=_t("Enables the Crossref polite pool and identifies requests to scholarly APIs."),
+        key=f"scholarly_api_email_{project.slug}",
+    )
+    if st.button(
+        _t("Save abstract settings"),
+        type="primary",
+        key=f"save_abstract_settings_{project.slug}",
+    ):
+        selected_providers = [
+            provider for provider in provider_values if provider != "__disabled__"
+        ]
+        if len(selected_providers) != len(set(selected_providers)):
+            st.error(_t("Each abstract provider can appear only once."))
+        elif not selected_providers:
+            st.error(_t("Select at least one abstract provider."))
+        else:
+            project.abstract_providers = selected_providers
+            project.abstract_batch_size = int(batch_size)
+            project.scholarly_api_email = scholarly_email.strip()
+            store.save_project(project)
+            if project.scholarly_api_email:
+                os.environ["CROSSREF_EMAIL"] = project.scholarly_api_email
+                os.environ["OPENALEX_EMAIL"] = project.scholarly_api_email
+                os.environ["NCBI_EMAIL"] = project.scholarly_api_email
+            st.success(_t("Abstract settings saved."))
+
+    st.divider()
     st.subheader(_t("API key"))
     saved_key = store.read_api_key(project.slug)
     api_key = st.text_input(
@@ -514,6 +612,109 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
         _t(
             "Saved keys are stored in a project-specific file under .secrets "
             "with owner-only permissions."
+        )
+    )
+
+    st.markdown(f"**{_t('Semantic Scholar API key')}**")
+    saved_semantic_scholar_key = store.read_semantic_scholar_api_key(project.slug)
+    semantic_scholar_key = st.text_input(
+        _t("Semantic Scholar API key"),
+        type="password",
+        placeholder=(
+            _t("A key is already saved")
+            if saved_semantic_scholar_key
+            else _t("Optional, but recommended for a dedicated rate limit")
+        ),
+        key=f"semantic_scholar_api_key_{project.slug}",
+        label_visibility="collapsed",
+    )
+    semantic_columns = st.columns(2)
+    with semantic_columns[0]:
+        if st.button(
+            _t("Apply Semantic Scholar key"),
+            width="stretch",
+            key=f"apply_semantic_scholar_key_{project.slug}",
+        ):
+            if not semantic_scholar_key.strip():
+                st.error(_t("Enter a new Semantic Scholar API key before applying it."))
+            else:
+                os.environ["SEMANTIC_SCHOLAR_API_KEY"] = semantic_scholar_key.strip()
+                store.save_semantic_scholar_api_key(project.slug, semantic_scholar_key)
+                st.success(_t("The Semantic Scholar API key is ready."))
+    with semantic_columns[1]:
+        st.link_button(
+            _t("Request a Semantic Scholar key"),
+            "https://www.semanticscholar.org/product/api",
+            width="stretch",
+        )
+
+    st.markdown(f"**{_t('NCBI API key')}**")
+    saved_ncbi_key = store.read_ncbi_api_key(project.slug)
+    ncbi_key = st.text_input(
+        _t("NCBI API key"),
+        type="password",
+        placeholder=(
+            _t("A key is already saved")
+            if saved_ncbi_key
+            else _t("Optional; PubMed batching works without a key")
+        ),
+        key=f"ncbi_api_key_{project.slug}",
+        label_visibility="collapsed",
+    )
+    if st.button(
+        _t("Apply NCBI key"),
+        width="stretch",
+        key=f"apply_ncbi_key_{project.slug}",
+    ):
+        if not ncbi_key.strip():
+            st.error(_t("Enter a new NCBI API key before applying it."))
+        else:
+            os.environ["NCBI_API_KEY"] = ncbi_key.strip()
+            store.save_ncbi_api_key(project.slug, ncbi_key)
+            st.success(_t("The NCBI API key is ready."))
+
+    st.markdown(f"**{_t('OpenAlex API key')}**")
+    saved_openalex_key = store.read_openalex_api_key(project.slug)
+    openalex_key = st.text_input(
+        _t("OpenAlex API key"),
+        type="password",
+        placeholder=(
+            _t("A key is already saved")
+            if saved_openalex_key
+            else _t("Enter your OpenAlex API key")
+        ),
+        key=f"openalex_api_key_{project.slug}",
+        label_visibility="collapsed",
+    )
+    openalex_remember = st.checkbox(
+        _t("Save this OpenAlex key on this computer"),
+        value=True,
+        key=f"openalex_remember_{project.slug}",
+    )
+    openalex_columns = st.columns(2)
+    with openalex_columns[0]:
+        if st.button(
+            _t("Apply OpenAlex key"),
+            width="stretch",
+            key=f"apply_openalex_key_{project.slug}",
+        ):
+            if not openalex_key.strip():
+                st.error(_t("Enter a new OpenAlex API key before applying it."))
+            else:
+                os.environ["OPENALEX_API_KEY"] = openalex_key.strip()
+                if openalex_remember:
+                    store.save_openalex_api_key(project.slug, openalex_key)
+                st.success(_t("The OpenAlex API key is ready."))
+    with openalex_columns[1]:
+        st.link_button(
+            _t("Get a free OpenAlex key"),
+            "https://openalex.org/settings/api",
+            width="stretch",
+        )
+    st.caption(
+        _t(
+            "OpenAlex now requires a free API key for sustained discovery and abstract "
+            "enrichment. The key is stored with the same local protection as the OpenAI key."
         )
     )
 
@@ -567,8 +768,9 @@ def _render_run_center(
     state = service.current_state_or_none(project.slug)
     task = _task_manager().snapshot(project.slug)
     if state or task:
-        _render_current_run_progress(project.slug)
+        _render_current_run_progress(project.slug, service)
     if state:
+        _render_literature_flow(state)
         _render_round_overview(state)
 
     if not state:
@@ -722,7 +924,7 @@ def _render_manual_additions(
     state = service.current_state_or_none(project.slug)
     task = _task_manager().snapshot(project.slug)
     if task and task.running:
-        _render_current_run_progress(project.slug)
+        _render_current_run_progress(project.slug, service)
 
     st.subheader(_t("Saved manual papers"))
     if records:
@@ -1147,7 +1349,7 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
     _render_round_overview(state)
     task = _task_manager().snapshot(project.slug)
     if task and task.running:
-        _render_current_run_progress(project.slug)
+        _render_current_run_progress(project.slug, service)
         st.info(_t("This run continues in the background. You can safely visit another page."))
         return
     latest = state["rounds"][-1]
@@ -1523,7 +1725,7 @@ def _render_corpus_analysis(
         "progress", {}
     )
     if (task and task.running) or progress_state.get("operation") == "Corpus analysis":
-        _render_current_run_progress(project.slug)
+        _render_current_run_progress(project.slug, service)
     has_key = store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
     if st.button(
         _t("Analyze final corpus"),
@@ -1638,6 +1840,115 @@ def _render_round_overview(state: dict[str, Any]) -> None:
             }
         )
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+
+def _render_literature_flow(state: dict[str, Any]) -> None:
+    rounds = [
+        (round_state, round_flow_stages(round_state))
+        for round_state in state.get("rounds", [])
+    ]
+    rounds = [(round_state, stages) for round_state, stages in rounds if stages]
+    if not rounds:
+        return
+
+    st.subheader(_t("Literature flow"))
+    st.caption(
+        _t(
+            "Counts are saved after every completed stage. Enrichment stages add metadata "
+            "without removing papers."
+        )
+    )
+    for round_state, stages in rounds:
+        round_index = int(round_state.get("index", 0))
+        if len(rounds) > 1:
+            st.markdown(
+                f"**{_t('Round')} {round_index}: "
+                f"{_state_label(round_state.get('kind', ''))}**"
+            )
+        nodes: list[str] = []
+        for index, stage in enumerate(stages):
+            stage_type = str(stage.get("type") or "filter")
+            retained = max(int(stage.get("retained") or 0), 0)
+            excluded = max(int(stage.get("excluded") or 0), 0)
+            details = stage.get("details") or {}
+            detail_text = " · ".join(
+                f"{escape(_t(str(key)))}: {escape(str(value))}"
+                for key, value in details.items()
+                if value not in (None, "")
+            )
+            if stage_type == "discovery":
+                change_text = _t("identified")
+            elif stage_type == "enrichment":
+                change_text = _t("no papers removed")
+            else:
+                change_text = _t("{count} excluded", count=f"{excluded:,}")
+            nodes.append(
+                '<div class="survey-flow-node survey-flow-'
+                f'{escape(stage_type)}">'
+                f'<div class="survey-flow-label">{escape(_t(str(stage.get("label") or "")))}</div>'
+                f'<div class="survey-flow-count">{retained:,}</div>'
+                f'<div class="survey-flow-change">{escape(change_text)}</div>'
+                + (f'<div class="survey-flow-detail">{detail_text}</div>' if detail_text else "")
+                + "</div>"
+            )
+            if index < len(stages) - 1:
+                nodes.append('<div class="survey-flow-arrow" aria-hidden="true">&#8594;</div>')
+        st.markdown(f'<div class="survey-flow">{"".join(nodes)}</div>', unsafe_allow_html=True)
+
+    abstract_api_requests = sum(
+        int(round_state.get("counts", {}).get("abstract_api_requests") or 0)
+        for round_state, _ in rounds
+    )
+    abstract_cache_hits = sum(
+        int(round_state.get("counts", {}).get("abstract_cache_hits") or 0)
+        for round_state, _ in rounds
+    )
+    abstract_batch_requests = sum(
+        int(round_state.get("counts", {}).get("abstract_batch_requests") or 0)
+        for round_state, _ in rounds
+    )
+    rate_limit_retries = sum(
+        int(round_state.get("counts", {}).get("abstract_rate_limit_retries") or 0)
+        for round_state, _ in rounds
+    )
+    rate_limit_wait = sum(
+        float(round_state.get("counts", {}).get("abstract_rate_limit_wait_seconds") or 0)
+        for round_state, _ in rounds
+    )
+    if abstract_api_requests or abstract_cache_hits:
+        diagnostic = _t(
+            "Abstract enrichment: {requests} API requests, {batches} batch requests, "
+            "{cache_hits} cache hits, {retries} rate-limit retries, {wait} seconds waiting.",
+            requests=f"{abstract_api_requests:,}",
+            batches=f"{abstract_batch_requests:,}",
+            cache_hits=f"{abstract_cache_hits:,}",
+            retries=f"{rate_limit_retries:,}",
+            wait=f"{rate_limit_wait:.1f}",
+        )
+        if rate_limit_retries:
+            st.warning(diagnostic)
+        else:
+            st.caption(diagnostic + " " + _t("No HTTP 429 throttling was observed."))
+
+    download_columns = st.columns(2)
+    with download_columns[0]:
+        st.download_button(
+            _t("Download flow diagram"),
+            data=build_flow_svg(state),
+            file_name=f"{state.get('run_id', 'run')}_flow_diagram.svg",
+            mime="image/svg+xml",
+            icon=":material/image:",
+            width="stretch",
+        )
+    with download_columns[1]:
+        st.download_button(
+            _t("Download flow counts"),
+            data=json.dumps(flow_summary_payload(state), ensure_ascii=False, indent=2),
+            file_name=f"{state.get('run_id', 'run')}_flow_summary.json",
+            mime="application/json",
+            icon=":material/download:",
+            width="stretch",
+        )
 
 
 def _render_domain_source_selector(
@@ -1791,7 +2102,10 @@ def _t(message: str, **values: object) -> str:
 
 
 @st.fragment(run_every=1.0)
-def _render_current_run_progress(project_slug: str) -> None:
+def _render_current_run_progress(
+    project_slug: str,
+    service: PipelineService,
+) -> None:
     service = PipelineService(_store())
     state = service.current_state_or_none(project_slug)
     task = _task_manager().snapshot(project_slug)
@@ -1894,16 +2208,44 @@ def _render_current_run_progress(project_slug: str) -> None:
             _task_manager().cancel(project_slug)
             st.rerun()
     elif task and task.can_restart and (task.cancelled or task.error):
+        can_resume_initial = operation in {"Initial discovery", "Resume initial discovery"}
         if st.button(
-            _t("Run again"),
+            _t("Resume run") if can_resume_initial else _t("Run again"),
             icon=":material/replay:",
             type="primary",
             key=f"restart_run_{project_slug}",
         ):
-            if _task_manager().restart(project_slug):
+            restarted = (
+                _task_manager().start(
+                    project_slug,
+                    "resume_initial_discovery",
+                    service.resume_initial_discovery,
+                    project_slug,
+                )
+                if can_resume_initial
+                else _task_manager().restart(project_slug)
+            )
+            if restarted:
                 st.rerun()
             else:
                 st.warning(_t("The previous task is still stopping. Please wait."))
+    elif progress_status == "cancelled" and operation in {
+        "Initial discovery",
+        "Resume initial discovery",
+    }:
+        if st.button(
+            _t("Resume run"),
+            icon=":material/replay:",
+            type="primary",
+            key=f"resume_saved_run_{project_slug}",
+        ):
+            if _task_manager().start(
+                project_slug,
+                "resume_initial_discovery",
+                service.resume_initial_discovery,
+                project_slug,
+            ):
+                st.rerun()
 
     if task and task.running:
         if not task.cancel_requested:
@@ -2081,6 +2423,35 @@ def _apply_styles() -> None:
         [data-testid="stMetricValue"] > div {font-size: inherit !important; line-height: inherit;}
         [data-testid="stSidebar"] {border-right: 1px solid #d8dee8;}
         [data-testid="stAppDeployButton"] {display: none;}
+        .survey-flow {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            overflow-x: auto;
+            padding: 4px 2px 12px;
+        }
+        .survey-flow-node {
+            flex: 0 0 164px;
+            min-height: 126px;
+            border: 1px solid #cbd3de;
+            border-top: 4px solid #4d6f91;
+            border-radius: 6px;
+            padding: 12px;
+            background: #ffffff;
+        }
+        .survey-flow-filter {border-top-color: #a65353;}
+        .survey-flow-enrichment {border-top-color: #397d73;}
+        .survey-flow-review {border-top-color: #66723f;}
+        .survey-flow-label {font-size: 0.82rem; font-weight: 650; line-height: 1.2;}
+        .survey-flow-count {
+            font-size: 1.45rem;
+            font-weight: 700;
+            line-height: 1.25;
+            margin-top: 8px;
+        }
+        .survey-flow-change {font-size: 0.74rem; color: #596273; margin-top: 2px;}
+        .survey-flow-detail {font-size: 0.7rem; color: #6b7280; line-height: 1.25; margin-top: 8px;}
+        .survey-flow-arrow {flex: 0 0 auto; color: #6b7280; font-size: 1.2rem;}
         h1, h2, h3, p, label, button {letter-spacing: 0 !important;}
         </style>
         """,

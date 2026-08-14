@@ -16,18 +16,27 @@ dblp:
   retries: 3
 
 enrichment:
-  # OpenAlex is the default because it currently works reliably without an API key.
-  # Add semantic_scholar after setting SEMANTIC_SCHOLAR_API_KEY if you want S2 fallback.
+  # Discovery-native abstracts are retained first. Remaining papers move through
+  # this fallback chain and stop after the first successful abstract match.
   providers:
+    - arxiv
+    - pubmed
+    - crossref
+    - semantic_scholar
     - openalex
   cache_dir: data/cache/abstracts
+  batch_size: 100
   request_delay_seconds: 0.2
+  arxiv_request_delay_seconds: 3.0
   timeout_seconds: 30
   retries: 3
   min_title_similarity: 0.86
+  crossref_email_env: CROSSREF_EMAIL
   semantic_scholar_api_key_env: SEMANTIC_SCHOLAR_API_KEY
   openalex_api_key_env: OPENALEX_API_KEY
   openalex_email_env: OPENALEX_EMAIL
+  pubmed_api_key_env: NCBI_API_KEY
+  pubmed_email_env: NCBI_EMAIL
 
 venue_quality:
   # CORE conference ranks are queried from the official portal when enabled,

@@ -20,7 +20,7 @@ sources:
     status: available
     record_types: [articles, books, chapters, dissertations, preprints]
     capabilities: [metadata, abstracts, citations, open access links]
-    requires_key: false
+    requires_key: true
     scope:
       en: Broad multidisciplinary index covering sciences, social sciences, and humanities.
       zh: 覆盖自然科学、社会科学和人文学科的综合性学术索引。
@@ -35,7 +35,7 @@ sources:
     label: Crossref
     status: available
     record_types: [journal articles, proceedings, books, chapters, datasets]
-    capabilities: [metadata, DOI resolution]
+    capabilities: [metadata, DOI resolution, deposited abstracts]
     requires_key: false
     scope:
       en: Publisher-deposited scholarly metadata across many disciplines.

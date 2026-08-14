@@ -2,43 +2,67 @@
 
 [English](#english) | [中文](#中文) | [日本語](#日本語) | [한국어](#한국어)
 
-## Workflow
+SurveyFlow is a local graphical workspace for building an auditable literature
+survey. It combines multi-source discovery, deterministic filtering, abstract
+enrichment, optional AI recommendations, mandatory human review, citation
+snowballing, final export, PDF question answering, and corpus classification.
 
-AI screening is optional and produces recommendations only. A human reviewer
-makes the final inclusion decision in every discovery and snowballing round.
+## Workflow
 
 ```mermaid
 flowchart TD
-    A["Define the research scope<br/>Question, years, keywords, and sources"] --> B["Search selected literature sources"]
+    A["Define the research scope<br/>Question, years, keywords, criteria, and sources"] --> B["Search selected literature sources"]
     B --> C["Normalize and deduplicate records"]
     P["Add known papers manually"] --> C
     C --> E["Apply rule-based title exclusions"]
     E --> T{"Use batched AI title prescreen?"}
-    T -- Yes --> U["Keep relevant or ambiguous titles<br/>and cache every title decision"]
-    T -- No --> D["Enrich venue rank, IF, and abstracts"]
+    T -- Yes --> U["Keep relevant or ambiguous titles<br/>Cache every title decision"]
+    T -- No --> D["Enrich venue rank and IF<br/>Preserve native abstracts, then use fallbacks"]
     U --> D
     D --> F{"Use abstract-level AI screening?"}
-    F -- Yes --> G["Generate LLM recommendations<br/>from titles and abstracts"]
-    F -- No --> H["Create the review queue"]
+    F -- Yes --> G["Generate AI recommendations<br/>from titles and abstracts"]
+    F -- No --> H["Create a human-only review queue"]
     G --> H
-    H --> I["Human audit<br/>Include, related, or exclude"]
+    H --> I["Human audit<br/>Include, related, exclude, or review later"]
     I --> J{"Run citation snowballing?"}
-    J -- Yes --> K["Collect references and citing works<br/>from included papers"]
+    J -- Yes --> K["Collect references and citing works<br/>from included and related papers"]
     K --> C
-    J -- "No or converged" --> L["Export the final corpus<br/>with its audit trail"]
+    J -- "No or converged" --> L["Export the final corpus<br/>with its complete audit trail"]
     L --> M["Ask questions about selected PDFs<br/>with saved conversation memory"]
     L --> N["Design a taxonomy and<br/>classify the final corpus"]
 ```
 
+AI screening is optional and produces recommendations only. A human reviewer
+makes the final inclusion decision in the initial discovery round and every
+snowballing round. The Run Center records the number of papers entering,
+leaving, and remaining after each stage. Enrichment stages add metadata and do
+not remove records.
+
+---
+
 ## English
 
-SurveyFlow is a local graphical tool for literature discovery, abstract
-enrichment, AI-assisted screening, human review, and citation snowballing.
+### 1. Recommended Input Language
 
-### Fastest Start
+The interface can be displayed in English, Chinese, Japanese, or Korean. We
+strongly recommend entering the research content in **English**, including the
+project name, research question, scope description, keyword groups, inclusion
+criteria, exclusion criteria, title exclusion terms, screening prompt, reviewer
+notes, and classification guidance.
+
+English input usually gives better coverage because most scholarly indexes
+store titles and abstracts in English, and it keeps search terms and AI
+instructions consistent across data sources. When surveying non-English
+literature, keep the English terms and deliberately add the relevant native
+terms as alternatives in the same keyword group. For manually added papers,
+preserve the official spelling of the title, authors, and venue.
+
+### 2. Installation and Start
+
+#### Quick-start package
 
 Download `SurveyFlow-quickstart.zip` from the project's GitHub Releases page and
-extract it, then:
+extract it.
 
 **Windows:** double-click `start.bat`.
 
@@ -49,71 +73,462 @@ sh start.sh
 ```
 
 Open <http://localhost:8501>. On the first start, the launcher installs a private
-copy of `uv`, Python, and the required packages. Nothing is installed globally.
-Internet access is required during the first start and while searching papers.
+copy of `uv`, Python, and the required packages inside the SurveyFlow folder.
+Nothing is installed globally. Internet access is required during the first
+start and while using online literature or AI services.
 
-To stop SurveyFlow, return to the launcher terminal and press `Ctrl+C`. On
-Windows, closing the launcher window also stops the app.
+To stop the application itself, return to the launcher terminal and press
+`Ctrl+C`. On Windows, closing the launcher window also stops it.
 
-### Docker Start
+#### Start from the source repository
 
-When Docker Desktop is installed, run:
+If `uv` is already installed:
+
+```bash
+uv sync --no-dev
+uv run vnn-survey-app
+```
+
+#### Docker
+
+With Docker Desktop installed:
 
 ```bash
 docker compose up --build
 ```
 
-Open <http://localhost:8501>. To stop it, press `Ctrl+C`, then run:
+Open <http://localhost:8501>. To stop and remove the running container:
 
 ```bash
 docker compose down
 ```
 
-### Use the App
+### 3. Workspace Guide
 
-1. Select the interface language in the sidebar.
-2. Create a project, choose the research field and recommended literature sources,
-   then enter the research question, years, and keyword groups.
-3. On **Scope**, adjust the source multi-select and check the Boolean query preview.
-4. Optionally add an OpenAI API key on **AI settings** and choose separate models
-   for screening, paper Q&A, and corpus classification.
-5. Start retrieval on **Run center**. Optionally enable the high-recall, batched AI
-   title prescreen so clearly irrelevant papers are removed before venue and abstract
-   enrichment. The background run, screening counts, paper count, and progress remain
-   visible after you leave the page and return.
-6. On **Add papers**, search a known title or enter its metadata manually. Synchronize
-   additions before creating the review queue.
-7. Prepare the round with AI screening or human-only screening.
-8. Make the final decision for every paper on **Manual review**.
-9. Run citation expansion on **Snowball**, then export from **Results**.
-10. On **AI research**, upload a PDF to ask questions with saved conversation
-    memory, or classify the whole final corpus using your own criteria. Leave the
-    criteria empty to let the model propose a taxonomy.
+The sidebar selects the interface language, active project, and one of the eight
+workspace pages. Each project has an independent scope, credentials, run
+history, review decisions, PDFs, and AI analysis files.
 
-Live search connectors are available for DBLP, OpenAlex, Crossref, arXiv, and
-PubMed. OpenAIRE and Europeana appear as planned specialist sources and cannot
-yet be selected. Humanities, arts, design, and architecture projects default to
-broad scholarly indexes and can use manual additions for books, catalogues, or
-local publications missed by those indexes.
+#### 3.1 Scope
 
-AI recommendations never replace human decisions. Projects and results are
-stored in `data/app_projects/`; saved API keys are stored separately in
-`.secrets/app_projects/`. These folders persist when Docker is rebuilt.
-Uploaded PDFs, conversations, taxonomies, classifications, and analysis reports
-are also stored locally inside the project folder.
-When an AI action is run, the required paper text or PDF is sent to the configured
-API endpoint; users should only upload documents they are permitted to process.
+The Scope page defines what the survey is about and how the initial search is
+constructed.
 
-Already have `uv`? Run `uv sync --no-dev` and `uv run vnn-survey-app`.
+| Field | Purpose and guidance |
+| --- | --- |
+| **Project name** | A short, stable name used in the project selector and local folder name. |
+| **Research field** | Selects a domain profile and suggests appropriate literature sources. It does not prevent you from overriding the source list. |
+| **Literature sources** | Select one or more live search connectors. Combining sources improves coverage but increases retrieval time and duplicate records. |
+| **Research question** | State the question the final survey should answer, including the target object, method, property, or population. |
+| **Start / End year** | Restricts the publication period. Use the earliest plausible year for the technique rather than an arbitrary wide range. |
+| **Scope description** | Define target models or objects, accepted methods, properties, guarantees, application boundaries, and important non-goals. This text also informs the generated AI prompt. |
+| **Keyword groups** | Put synonyms and alternatives in the same group. Terms within one group use **OR**; different groups use **AND**. |
+| **Inclusion criteria** | One independently checkable condition per line. These guide AI recommendations and human audit decisions. |
+| **Exclusion criteria** | One clear reason for exclusion per line. Describe conceptual exclusions, not only unwanted words. |
+| **Title exclusion terms** | Optional high-precision phrases removed before expensive enrichment. Use conservatively because a matching title is excluded automatically. |
+| **Keep arXiv / CoRR** | Retains preprint records. Deduplication may later merge preprint and published metadata, but human review should still check versions. |
+| **Keep informal records** | Retains records that are not clearly conference, journal, or preprint publications. Useful for broad reviews, but often disabled for strict publication-only corpora. |
+
+The Boolean logic is:
+
+```text
+(term A1 OR term A2 OR ...) AND (term B1 OR term B2 OR ...) AND ...
+```
+
+Adding a term to an existing group broadens that concept. Adding a new group
+narrows the search because every paper must match at least one term from every
+group. Spaces inside a phrase are part of the phrase; they are not an additional
+AND operator. Always inspect **Query preview** and **Show generated queries**
+before a full run.
+
+After changing the scope or criteria, open **AI settings** and select
+**Regenerate from scope** so that future AI decisions use the new definition.
+Existing audit decisions are intentionally preserved.
+
+#### 3.2 Data Sources
+
+No single scholarly database is complete. Choose sources according to the
+research domain and use manual additions for known omissions.
+
+| Source | Best use | Important limitation |
+| --- | --- | --- |
+| **DBLP** | Curated computer-science metadata, especially conference and journal papers. | Not intended to cover fields outside computer science; it usually does not provide abstracts. |
+| **OpenAlex** | Broad multidisciplinary discovery, citation links, open-access links, and many reconstructed abstracts. | Coverage and metadata quality vary; a free API key is required for sustained use. |
+| **Crossref** | Publisher-deposited DOI metadata across many disciplines and some deposited abstracts. | Records without a Crossref DOI and many local or older publications may be absent. |
+| **arXiv** | Preprints in computer science, mathematics, physics, and related quantitative fields, usually with abstracts. | It is not a complete index of peer-reviewed publications or all disciplines. |
+| **PubMed** | Biomedical and life-science journal literature with strong abstract coverage. | It is specialized and should not be treated as a general engineering or humanities index. |
+| **OpenAIRE / Europeana** | Shown as planned sources for open research and cultural heritage. | Their live connectors are not implemented yet and cannot currently be selected. |
+
+Humanities, arts, design, and architecture projects can start with OpenAlex and
+Crossref, then manually add books, catalogues, archival objects, or local
+publications missed by article-oriented indexes.
+
+#### 3.3 AI Settings
+
+AI settings are project-specific.
+
+**Models and endpoint**
+
+- **Base URL** is the API endpoint. Keep `https://api.openai.com/v1` for the
+  official OpenAI API. Change it only when using a compatible provider that
+  explicitly documents a different endpoint.
+- **Screening model** is used for batched title prescreening and abstract-level
+  screening.
+- **Paper Q&A model** answers questions about uploaded PDFs.
+- **Corpus analysis model** proposes a taxonomy and classifies the final corpus.
+- **Refresh model list** loads the models available to the configured key and
+  endpoint. The three tasks can use different models to balance cost and depth.
+
+**Credentials**
+
+- The **OpenAI API key** enables title screening, abstract screening, PDF Q&A,
+  and corpus classification.
+- The **OpenAlex API key** is free and required for sustained OpenAlex discovery,
+  enrichment, and citation snowballing.
+- A **Semantic Scholar API key** is optional but gives a dedicated rate limit.
+- An **NCBI API key** is optional; PubMed works without one but may allow lower
+  request rates.
+- A **Scholarly API contact email** identifies requests and enables Crossref's
+  polite pool.
+
+Select **Apply** after entering a key. Saved credentials are written to a
+project-specific file under `.secrets/app_projects/` with owner-only permissions;
+they are never written into the project YAML, exported CSV files, or logs.
+
+**Abstract enrichment**
+
+Abstracts already returned by a discovery source are always preserved first.
+For missing abstracts, each paper is tried against the configured providers in
+priority order and stops after the first successful match. Duplicate providers
+are not allowed.
+
+The **Maximum identifier batch size** controls how many identifiers the system
+tries to group, while provider limits are applied automatically: OpenAlex and
+arXiv use at most 100 identifiers, PubMed 200, and Semantic Scholar 500 per
+request. Crossref exact DOI resolution and title-only fallbacks may still require
+individual requests because the upstream services do not expose an equivalent
+multi-record operation for every lookup path. Cached results are reused.
+
+Choose providers by field. For computer science, a practical order is arXiv,
+Crossref, Semantic Scholar, then OpenAlex. For biomedical work, place PubMed
+first. A provider later in the list only receives papers still missing abstracts.
+
+**Screening prompt**
+
+The system prompt is generated from the research question, scope, and criteria.
+It can be edited directly and saved. Its content hash is used in the AI cache, so
+changing the prompt prevents incompatible older responses from being silently
+reused. **Regenerate from scope** replaces the editor content with a fresh prompt
+based on the current Scope page.
+
+#### 3.4 Run Center
+
+The Run Center performs discovery first and asks for separate confirmation
+before abstract-level AI screening.
+
+**Initial discovery controls**
+
+| Control | Meaning |
+| --- | --- |
+| **Literature sources** | The connectors used for this run. They may be changed without rewriting the saved project defaults. |
+| **DBLP connection mode** | `auto` tries the publication API and falls back to SPARQL; the other choices force one mode. |
+| **Query limit** | `0` runs every generated query. Use a small value for a smoke test. |
+| **Abstract limit** | `0` enriches every eligible paper. A small value is useful for testing provider settings. |
+| **Look up CORE ranks online** | Attempts to add CORE conference ranks. Impact Factor is only populated when local/reference venue data supports it. Missing values do not imply low quality. |
+| **Use AI title prescreen** | Sends titles in high-recall batches before venue and abstract enrichment. Clearly irrelevant titles are excluded; ambiguous titles are retained. |
+| **Titles per AI batch** | Controls title-screening batch size. Larger batches reduce request count but create larger prompts. |
+
+The initial run records these stages: source discovery, normalization and
+deduplication, deterministic rule screening, optional AI title prescreening,
+venue enrichment, and abstract enrichment. The live panel displays the run ID,
+operation, status, current paper count, overall progress, item progress, and the
+latest saved time. The literature-flow diagram and JSON download preserve the
+paper count at each completed stage, including API requests, cache hits, and
+observed rate-limit waiting for abstract enrichment.
+
+**Stop, resume, and run again**
+
+- **Stop run** requests a cooperative stop. The current network request or batch
+  finishes before files are closed, so stopping is not always instantaneous.
+- **Resume run** continues a stopped initial discovery from the latest candidate,
+  rule-screening, title-screening, venue, or partial abstract checkpoint.
+- **Run again** restarts a stopped non-initial operation when that operation
+  supports restart.
+- **Start a new initial run** creates a separate run and makes it current. Existing
+  run files and audit history are retained; it is not a resume action.
+
+After discovery, the page estimates the number of AI-eligible papers and token
+usage. Enable **Use AI abstract screening** to receive title-and-abstract
+recommendations, or create a human-only queue. **AI paper limit = 0** means all
+eligible papers; use a small number to test the prompt and cost first.
+
+#### 3.5 Add Papers
+
+Use this page for known papers that automatic retrieval missed.
+
+1. Search the full or approximate title in selected sources.
+2. Confirm the correct metadata match and record why it was added.
+3. If no match exists, enter title, semicolon-separated authors, year (`0` if
+   unknown), venue, publication type, DOI, URL, and an addition note.
+4. Select **Synchronize manual papers** before creating the first review queue.
+
+Every manual paper is normalized and deduplicated. If no run exists, it enters
+the next initial discovery automatically. If the current initial review queue
+already exists, start a new initial run instead of rewriting completed audit
+history.
+
+#### 3.6 Manual Review
+
+Manual review is the authoritative selection stage.
+
+- Select an audit round and filter by title/abstract text or current decision.
+- Inspect title, year, venue type, CORE rank, Impact Factor, abstract, AI
+  recommendation, confidence, rationale, and cited evidence where available.
+- Set **Include** for papers inside the primary scope.
+- Set **Related** for relevant downstream, background, repair, explainability, or
+  methodology papers that should remain available and become snowball seeds but
+  may be discussed separately from the core corpus.
+- Set **Exclude** and record a short reason that maps to an exclusion criterion.
+- Use **Later** only as a temporary marker; a round cannot seed the next
+  snowballing round until every paper has a final manual decision.
+
+Save decisions frequently. The audit CSV can be downloaded at any time. The
+paper reader below the table provides a larger abstract and AI-evidence view.
+
+#### 3.7 Snowball
+
+Included and related papers become seeds. Each round retrieves backward
+references and forward citations through the citation infrastructure, normalizes
+the records, deduplicates them against all papers already audited, and applies
+the same title filtering, metadata enrichment, abstract enrichment, optional AI
+screening, and human review process.
+
+**References per seed** and **Citations per seed** cap expansion size; they are
+not relevance thresholds. Finish every manual decision in the current round
+before starting the next round. Snowballing is marked **converged** when a round
+adds zero new unique papers to the review queue. This is operational convergence
+for the selected seeds, source coverage, and limits, not proof that no relevant
+paper exists anywhere.
+
+#### 3.8 Results
+
+After at least one audited round, select **Generate final exports**. The page
+combines all rounds and reports the number of rounds, audited papers, included
+papers, and exclusions. It also charts included papers by year and venue type.
+
+The downloadable artifacts are:
+
+- **Included papers CSV**: the final included/related corpus with metadata.
+- **Complete audit CSV**: every reviewed paper and its provenance, AI output,
+  manual decision, and notes.
+- **Final report**: a Markdown summary of the selection results.
+
+Treat missing rank or Impact Factor values as missing metadata, not evidence of
+venue quality. Keep the complete audit export with the final corpus so the study
+remains reproducible.
+
+#### 3.9 AI Research
+
+This page becomes available after final exports are generated.
+
+**Paper Q&A** lets the user select an included paper, upload its PDF, select a
+model, and ask detailed questions. The PDF, provider file identifier, and
+conversation history are stored locally for that paper. **Clear conversation**
+starts a fresh local history.
+
+**Corpus classification** analyzes the whole included corpus. Enter guidance
+such as verified property, method, guarantee type, research objective, or
+application domain. If the field is empty, the model proposes a taxonomy. The
+page displays category counts and rationales and exports the taxonomy JSON,
+classification CSV, and Markdown analysis report.
+
+AI analysis remains research assistance. Check claims against the papers before
+using them in a survey. The required paper text or uploaded PDF is sent to the
+configured API endpoint, so only process documents you are permitted to upload.
+
+### 4. Worked Example: Transformer Verification Survey
+
+The following example is intentionally written in English and can be entered
+directly into the application.
+
+#### Project and sources
+
+| Field | Example value |
+| --- | --- |
+| **Project name** | `Transformer Verification Survey` |
+| **Research field** | `Computer Science` |
+| **Literature sources** | `DBLP`, `OpenAlex`, `Crossref`, `arXiv` |
+| **Start year** | `2017` |
+| **End year** | Current year |
+| **Keep arXiv / CoRR** | Enabled during candidate discovery |
+| **Keep informal records** | Enabled during discovery; decide publication eligibility during human review |
+
+#### Research question
+
+```text
+What formal verification, certification, provable repair, and formally grounded
+explainability techniques have been developed for Transformer-based models, and
+what properties, guarantees, assumptions, and scalability trade-offs do they
+provide?
+```
+
+#### Scope description
+
+```text
+This survey studies methods that formally verify Transformer-based neural
+networks, including self-attention models, BERT-family models, Vision
+Transformers, and large language models when the model itself is the verification
+target. It covers formal verification, certification, reachability, provable
+robustness, verification-guided or provable repair, and formally justified
+explainability or interpretability. It excludes work that merely uses an LLM as
+a tool to verify unrelated software, hardware, proofs, or documents, and excludes
+purely empirical testing without a stated formal guarantee.
+```
+
+#### Keyword groups
+
+Enter two rows. Terms inside each row use OR; the two rows use AND.
+
+| Group name | Terms, one per line |
+| --- | --- |
+| `Target model` | `transformer`<br>`self-attention`<br>`BERT`<br>`vision transformer`<br>`language model`<br>`large language model` |
+| `Formal activity` | `verification`<br>`formal verification`<br>`certification`<br>`certified robustness`<br>`reachability`<br>`provable repair`<br>`formal explainability`<br>`formal interpretability` |
+
+Conceptually, the generated search is:
+
+```text
+(transformer OR self-attention OR BERT OR "vision transformer" OR
+ "language model" OR "large language model")
+AND
+(verification OR "formal verification" OR certification OR
+ "certified robustness" OR reachability OR "provable repair" OR
+ "formal explainability" OR "formal interpretability")
+```
+
+#### Inclusion criteria, one per line
+
+```text
+The paper directly studies a Transformer, self-attention model, BERT-family model, Vision Transformer, or large language model as the verification target.
+The paper proposes, applies, or evaluates a method that provides a formal, sound, certified, or provable guarantee.
+The contribution concerns verification, certification, reachability, provable robustness, verification-guided or provable repair, or formally justified explainability.
+For LLM papers, the LLM itself must be the object of formal verification rather than a tool used to verify another artifact.
+The publication provides enough technical detail to assess its assumptions, property, and guarantee.
+```
+
+#### Exclusion criteria, one per line
+
+```text
+The LLM or Transformer is used only as a tool to verify software, hardware, smart contracts, proofs, documents, or other non-model artifacts.
+The work reports only empirical robustness, adversarial testing, red teaming, or runtime monitoring without a formal guarantee.
+The paper studies a non-Transformer neural network and does not contain a transferable Transformer- or attention-specific method.
+The term transformer refers to an electrical, power, or program-transformation concept rather than a neural architecture.
+The work is a duplicate, superseded version, abstract-only record, or lacks enough technical information for assessment.
+```
+
+#### Optional title exclusion terms
+
+```text
+power transformer, electrical transformer, speaker verification, document verification, fact verification
+```
+
+Keep this list conservative. Do not exclude words such as `survey`, `tutorial`,
+`repair`, or `explainability` automatically: such papers may provide background,
+verification-derived techniques, or useful snowball seeds.
+
+#### Suggested run strategy
+
+1. Save the scope and regenerate the screening prompt.
+2. Configure OpenAI and OpenAlex keys. For abstract enrichment, use `arXiv`,
+   `Crossref`, `Semantic Scholar`, then `OpenAlex`; disable PubMed for this
+   computer-science example unless biomedical applications are in scope.
+3. Run a small test with a limited number of queries, abstracts, and AI papers.
+4. For the full run, use all queries, enable high-recall AI title prescreening,
+   and inspect the literature-flow counts before abstract-level screening.
+5. Manually add known omissions, for example `NLP verification: towards a
+   general methodology for certifying robustness`, then synchronize additions.
+6. Use abstract-level AI output as a recommendation and manually audit every
+   paper. Include direct formal verification work; use Related for in-scope
+   provable repair or formally grounded explainability; exclude papers that use
+   LLMs only to verify unrelated artifacts.
+7. Snowball from all Include and Related papers. Audit every new round and stop
+   when the process converges or a documented stopping rule is reached.
+8. Generate final exports, retain the complete audit CSV, and only then use PDF
+   Q&A or corpus classification.
+
+### 5. Project Data and Reproducibility
+
+Projects and results are stored under `data/app_projects/`. Each project contains
+its generated configuration, editable prompt, manual additions, run folders,
+checkpoints, audit CSV files, exports, uploaded PDFs, conversations, and corpus
+analysis artifacts. API keys are stored separately under
+`.secrets/app_projects/`. Both locations persist across normal app restarts and
+Docker rebuilds when the supplied volume configuration is used.
+
+Starting a new run does not delete an older run. The project points to the newest
+current run while previous timestamped folders remain available on disk. Keep
+the scope, generated queries, flow-count JSON, complete audit CSV, and final
+corpus together when archiving or publishing a review.
+
+### 6. Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| The search returns thousands of unrelated papers | Inspect group logic. Put synonyms in the same row and independent concepts in separate rows. Add only high-precision title exclusions, then enable AI title prescreening. |
+| Abstract enrichment is slow | Check the flow diagnostics for 429 retries and wait time. Use native abstracts first, configure multiple fallback providers, provide recommended keys/email, and test on a limited set before a full run. |
+| Stop takes time | Stop is cooperative; the active HTTP request or AI batch must finish safely before the task exits. |
+| A stopped run begins discovery again | Use **Resume run** in Current run. **Start a new initial run** intentionally creates another run from the first stage. |
+| The current run disappears after changing pages | Return to Run Center for the full live panel. The sidebar also shows the selected project's saved status. Ensure the same project is selected. |
+| OpenAI says no key is available | Enter the key on AI settings and select **Apply API key**. Putting it in a research YAML file is intentionally unsupported. |
+| A known paper is missing | Search it on Add Papers or create a manual record, then synchronize before the review queue is created. |
+| Rank or Impact Factor is blank | The venue could not be matched to the available ranking metadata. Treat it as unknown and verify it manually if required. |
+
+### 7. Repository Map
+
+This section is mainly for maintainers and advanced users.
+
+| Path | Responsibility |
+| --- | --- |
+| `src/vnn_survey/app/` | Streamlit interface, project storage, background tasks, review workspace, and flow visualization. |
+| `src/vnn_survey/sources.py` | Live literature-source connectors and title lookup. |
+| `src/vnn_survey/pipeline.py` | Retrieval, normalization, deduplication, screening, and enrichment orchestration. |
+| `src/vnn_survey/enrichment.py` | Abstract-provider fallback, batching, caching, and rate-limit handling. |
+| `src/vnn_survey/snowballing.py` | Backward-reference and forward-citation expansion. |
+| `configs/source_catalog.yaml` | Data-source descriptions, capabilities, and availability. |
+| `configs/domain_profiles.yaml` | Research-domain choices and recommended source combinations. |
+| `data/venue_quality/` | Venue-quality reference data shipped with the app. |
+| `data/app_projects/` | Local runtime projects and research artifacts; excluded from Git. |
+| `.secrets/app_projects/` | Local credentials; excluded from Git and release archives. |
+| `tests/` | Automated tests for pipeline and application behavior. |
+
+Maintainers can rebuild the downloadable package with:
+
+```bash
+make package
+```
+
+---
 
 ## 中文
 
-SurveyFlow 是一个本地运行的图形化文献综述工具，支持论文检索、摘要补全、
-AI 辅助筛选、人工审阅和引用滚雪球。
+SurveyFlow 是一个本地运行、面向可审计文献综述的图形化平台。它把多数据源检索、
+规则筛选、摘要补全、可选的 AI 建议、人工审阅、引用滚雪球、结果导出、PDF 问答和
+文献集分类放在一个项目工作区内。
 
-### 最快启动方式
+### 1. 输入语言建议
 
-从项目的 GitHub Releases 页面下载并解压 `SurveyFlow-quickstart.zip`，然后：
+界面可以使用中文、英文、日文或韩文，但**强烈建议所有研究内容使用英文填写**，包括：
+项目名称、Research question、Scope description、关键词组、纳入标准、排除标准、
+标题排除词、AI prompt、人工备注和分类依据。多数数据库以英文标题和摘要建立索引，
+英文输入也能让不同数据源的检索式与 AI 判断标准保持一致。
+
+如果研究对象包含非英文文献，请保留英文关键词，并在同一个关键词组内有意识地加入对应
+语言的同义词。人工补录论文时，应保留论文题目、作者和发表场地的官方写法。
+
+完整的英文填写实例见 [Transformer Verification Survey](#4-worked-example-transformer-verification-survey)。
+
+### 2. 从零启动
+
+从 GitHub Releases 下载并解压 `SurveyFlow-quickstart.zip`。
 
 **Windows：** 双击 `start.bat`。
 
@@ -123,202 +538,367 @@ AI 辅助筛选、人工审阅和引用滚雪球。
 sh start.sh
 ```
 
-打开 <http://localhost:8501>。首次启动时，脚本会在项目目录内自动安装独立的
-`uv`、Python 和所需依赖，不会修改系统 Python。首次启动和检索论文时需要联网。
+浏览器打开 <http://localhost:8501>。首次启动时脚本会在 SurveyFlow 目录内安装独立的
+`uv`、Python 和依赖，不会修改系统 Python。首次安装、在线检索和 AI 功能需要联网。
 
-停止 SurveyFlow 时，回到启动程序所在的终端并按 `Ctrl+C`。在 Windows 上也可以
-直接关闭启动程序的窗口。
-
-### 使用 Docker 启动
-
-如果已经安装 Docker Desktop，运行：
+停止应用时回到启动终端按 `Ctrl+C`；Windows 也可以关闭启动窗口。已经安装 `uv` 的
+开发者可以运行：
 
 ```bash
-docker compose up --build
+uv sync --no-dev
+uv run vnn-survey-app
 ```
 
-打开 <http://localhost:8501>。停止时先按 `Ctrl+C`，然后运行：
+使用 Docker 时运行 `docker compose up --build`，停止时运行 `docker compose down`。
 
-```bash
-docker compose down
-```
+### 3. 各页面功能
 
-### 平台使用流程
+#### 3.1 研究范围（Scope）
 
-1. 在侧边栏选择界面语言。
-2. 创建项目，选择研究领域和推荐数据源，然后填写研究问题、年份和关键词组。
-3. 在**研究范围**页面调整数据源多选并检查布尔查询逻辑。
-4. 如需 AI 功能，在 **AI 设置**中填写 OpenAI API 密钥，并分别选择筛选、论文问答和
-   文献集分类模型。
-5. 在**运行中心**开始检索。可以启用高召回、批处理的 AI 标题预筛，在场地和摘要补全前
-   排除明确无关的论文。任务会在后台继续，离开页面后再次返回仍可查看当前阶段、筛选数量、
-   进度和已收集论文数量。
-6. 在**添加论文**中按标题查找已知论文，或手工填写元数据；建立审阅队列前同步补录结果。
-7. 选择 AI 辅助筛选或仅人工筛选，生成审阅队列。
-8. 在**人工审阅**中对每篇论文作出最终决定。
-9. 在**滚雪球检索**中扩展引用，最后在**结果**页面导出。
-10. 在 **AI 研究**中上传 PDF 并进行带本地对话记忆的问答，或按自行提供的标准对
-    整个最终文献集分类；不填写标准时由模型提出分类体系。
+这一页定义“要找什么”和“用什么逻辑找”。
 
-当前可实时检索 DBLP、OpenAlex、Crossref、arXiv 和 PubMed。OpenAIRE 与
-Europeana 会显示为计划接入的专业数据源，目前不能选择。人文、艺术、设计与建筑项目
-默认使用综合性学术索引，并可通过人工补录加入其中遗漏的书籍、图录或地方出版物。
+| 字段 | 填写方式 |
+| --- | --- |
+| **Project name** | 使用简短、稳定的英文项目名；它也用于本地项目目录。 |
+| **Research field** | 选择研究领域后，系统会推荐数据源；推荐结果可以手动覆盖。 |
+| **Literature sources** | 选择实际检索的数据源。数据源越多，覆盖面越广，但时间和重复记录也会增加。 |
+| **Research question** | 用一句完整英文问题写清研究对象、研究活动以及最终希望比较的内容。 |
+| **Start / End year** | 限制出版年份。起始年份应与目标技术出现时间相符。 |
+| **Scope description** | 详细定义研究对象、方法、性质、保证形式、应用边界以及明确不包含的内容。 |
+| **Keyword groups** | 同一行是同义词，使用 OR；不同行是不同概念，使用 AND。 |
+| **Inclusion criteria** | 每行一个可以被人工检查的纳入条件。 |
+| **Exclusion criteria** | 每行一个明确的概念性排除理由。 |
+| **Title exclusion terms** | 在摘要补全前自动排除标题命中的记录，只应填写误伤风险很低的短语。 |
+| **Keep arXiv / CoRR** | 是否在候选集中保留预印本。最终版本关系仍需人工判断。 |
+| **Keep informal records** | 是否保留无法明确识别为会议、期刊或预印本的记录。 |
 
-AI 只提供建议，不能代替人工决定。项目与结果保存在 `data/app_projects/`，
-保存的 API 密钥单独位于 `.secrets/app_projects/`。重新构建 Docker 不会删除这些数据。
-上传的 PDF、对话、分类体系、分类结果和分析报告同样保存在对应项目目录中。
-运行 AI 功能时，所需的论文文本或 PDF 会发送到配置的 API 端点；请仅上传获准处理的文档。
+关键词逻辑固定为：组内 OR、组间 AND。词组中的空格只是短语的一部分，不会额外产生
+AND。向已有组增加词会扩大检索；增加一个新组会收窄检索。正式运行前应查看
+**Query preview** 和生成的每条查询。修改研究范围后，到 **AI 设置**点击
+**Regenerate from scope**，让后续 AI 使用新标准。
 
-如果已经安装 `uv`，直接运行 `uv sync --no-dev` 和
-`uv run vnn-survey-app` 即可。
+#### 3.2 数据源
 
-## 日本語
+- **DBLP**：适合计算机科学会议和期刊元数据，会议覆盖较强，但通常没有摘要。
+- **OpenAlex**：跨学科、带引用关系和较多摘要，持续使用需要免费 API key；不同领域的
+  覆盖和元数据完整度不一致。
+- **Crossref**：适合带 DOI 的出版社元数据和部分摘要；无 Crossref DOI 的成果可能缺失。
+- **arXiv**：适合计算机、数学、物理等领域预印本，不能代表全部同行评审文献。
+- **PubMed**：适合生物医学和生命科学，不应作为通用人文或工程数据库。
+- **OpenAIRE / Europeana**：界面中显示为计划接入，目前不能用于实时检索。
 
-SurveyFlow は、文献検索、抄録の補完、AI 支援スクリーニング、手動レビュー、
-引用スノーボール検索に対応したローカル実行の文献レビュー用 GUI ツールです。
+任何数据源都不完整。人文、艺术、设计和建筑研究可先用 OpenAlex 与 Crossref，再通过
+**添加论文**补录书籍、图录、档案或地方出版物。
 
-### 最も簡単な起動方法
+#### 3.3 AI 设置
 
-プロジェクトの GitHub Releases ページから `SurveyFlow-quickstart.zip` を
-ダウンロードして展開し、次のように起動します。
+**模型与 Base URL：** Base URL 默认应保持为 `https://api.openai.com/v1`。只有在使用
+明确兼容 OpenAI 接口的其他服务时才修改。筛选模型用于标题和摘要筛选；论文问答模型
+用于 PDF；文献集分析模型用于生成分类体系和整体分类。三者可以选择不同规格。
 
-**Windows：** `start.bat` をダブルクリックします。
+**密钥：** OpenAI key 用于所有 AI 功能；OpenAlex 免费 key 用于持续检索、摘要和引用；
+Semantic Scholar 与 NCBI key 可选；Scholarly API contact email 用于标识请求并进入
+Crossref polite pool。输入后必须点击相应的 **Apply**。密钥只保存在
+`.secrets/app_projects/`，不会写入项目 YAML、CSV 或日志。
 
-**macOS / Linux：** 展開したフォルダーでターミナルを開き、次を実行します。
+**摘要补全：** 检索阶段已经获得的摘要优先保留。缺失摘要按 Fallback priority 从前往后
+尝试，某个来源成功后就不再请求后面的来源。Maximum identifier batch size 是用户设置的
+批大小上限，系统还会自动遵守不同服务的上限。部分 Crossref DOI 或仅标题查询仍需逐条
+请求，但结果会缓存。计算机领域可使用 arXiv、Crossref、Semantic Scholar、OpenAlex；
+医学领域应把 PubMed 放在前面。
 
-```bash
-sh start.sh
-```
+**Screening prompt：** prompt 根据研究问题、范围和纳入/排除标准自动生成，也可以编辑。
+保存后，prompt 的内容哈希会避免错误复用旧的 AI 缓存。研究范围变化后应重新生成。
 
-<http://localhost:8501> を開きます。初回起動時に、ランチャーがプロジェクト内へ
-専用の `uv`、Python、必要なパッケージを自動でインストールします。システムの
-Python は変更しません。初回起動時と論文検索時にはインターネット接続が必要です。
+#### 3.4 运行中心
 
-SurveyFlow を停止するには、起動に使用したターミナルへ戻って `Ctrl+C` を押します。
-Windows ではランチャーのウィンドウを閉じても停止できます。
+运行中心先执行检索和数据准备，再单独询问是否进行摘要级 AI 筛选。
 
-### Docker で起動
+- **Query limit = 0** 表示执行全部生成查询，小数字适合测试。
+- **Abstract limit = 0** 表示补全全部合格候选，小数字适合验证摘要来源。
+- **DBLP auto** 先尝试 publication API，失败时回退到 SPARQL。
+- **CORE ranks online** 尝试补充会议等级。IF 或 rank 为空表示元数据未知，不等于质量低。
+- **AI title prescreen** 在摘要补全前批量读取标题，以高召回方式排除明确无关项；模糊项保留。
+- **AI abstract screening** 在摘要补全后读取标题和摘要，生成更精细的纳入建议。
 
-Docker Desktop がインストールされている場合は、次を実行します。
+页面显示 Run ID、当前操作、状态、已收集论文数、总进度、当前批次和最后保存时间。
+Literature flow 会记录每一步的输入、排除和保留数量，并可下载 SVG 流程图和 JSON 统计。
+摘要诊断还显示 API 请求、批请求、缓存命中、429 重试和等待时间。
 
-```bash
-docker compose up --build
-```
+**Stop run** 是安全协作停止：正在执行的网络请求或 AI 批次结束后才退出，所以不一定立即
+停止。**Resume run** 从最近保存的候选、规则筛选、标题筛选、venue 或部分摘要 checkpoint
+继续。**Start a new initial run** 会创建一次独立的新运行并从检索开始，旧文件仍保留；
+它不是恢复按钮。
 
-<http://localhost:8501> を開きます。停止するには `Ctrl+C` を押してから、次を実行します。
+检索完成后，平台先估算摘要级 AI 的论文数和 token。建议先用小的 AI paper limit 检查
+prompt 与成本，再将 `0` 用于全部论文。也可以完全关闭 AI，创建纯人工队列。
 
-```bash
-docker compose down
-```
+#### 3.5 添加论文
 
-### アプリの使用手順
+这一页用于加入数据库漏掉但研究者已知的文章。优先输入完整或近似标题，在选择的数据源中
+确认匹配项；找不到时再手工填写 title、分号分隔的 authors、year（未知填 `0`）、venue、
+publication type、DOI、URL 和 addition note。补录记录也会标准化和去重。
 
-1. サイドバーで表示言語を選択します。
-2. プロジェクトを作成し、研究分野と推奨データソースを選んでから、研究課題、対象年、
-   キーワード・グループを入力します。
-3. **研究範囲**ページでデータソースの複数選択を調整し、ブール検索式を確認します。
-4. AI 機能を利用する場合は、**AI 設定**で OpenAI API キーを入力し、スクリーニング、
-   論文 Q&A、コーパス分類に使用するモデルを個別に選択します。
-5. **実行センター**で検索を開始します。高再現率のバッチ AI タイトル予備選別を有効にすると、
-   会場情報と抄録の補完前に明らかに無関係な論文を除外できます。他のページへ移動して戻っても、
-   バックグラウンド実行、選別件数、現在の工程、進捗、収集済み論文数を確認できます。
-6. **論文を追加**で既知のタイトルを検索するか、メタデータを手動入力します。
-   レビュー待ち行列を作成する前に追加内容を同期してください。
-7. AI 支援または手動のみのスクリーニングを選択し、レビュー待ち行列を作成します。
-8. **手動レビュー**で各論文の最終判定を入力します。
-9. **スノーボール検索**で引用を展開し、最後に**結果**ページから出力します。
-10. **AI 研究**で PDF をアップロードしてローカル保存される会話履歴付き Q&A を行うか、
-    独自の基準で最終コーパス全体を分類します。基準を空欄にするとモデルが分類体系を提案します。
+首次审阅队列建立前点击 **Synchronize manual papers**。如果审阅队列已经存在，平台不会
+重写审计历史，应新建一次 initial run 来纳入后来补充的论文。
 
-DBLP、OpenAlex、Crossref、arXiv、PubMed はライブ検索に対応しています。
-OpenAIRE と Europeana は専門データソースとして対応予定と表示され、まだ選択できません。
-人文学、芸術、デザイン、建築のプロジェクトでは幅広い学術索引を既定値とし、索引から
-漏れた書籍、カタログ、地域出版物を手動で追加できます。
+#### 3.6 人工审阅
 
-AI の提案が人による最終判定を置き換えることはありません。プロジェクトと結果は
-`data/app_projects/` に保存され、API キーは `.secrets/app_projects/` に分けて
-保存されます。Docker イメージを再構築しても、これらのデータは維持されます。
-アップロードした PDF、会話、分類体系、分類結果、分析レポートもプロジェクト内に保存されます。
-AI 機能の実行時には必要な論文テキストまたは PDF が設定済み API へ送信されます。
-処理の許可を得た文書のみをアップロードしてください。
+人工决定是最终依据。选择轮次后，可以搜索题目或摘要，并按未审阅、Include、Related、
+Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank、IF、AI 建议、置信度和
+理由；下方 Paper reader 用于完整阅读摘要和 AI evidence。
 
-既に `uv` がインストールされている場合は、`uv sync --no-dev` と
-`uv run vnn-survey-app` を実行できます。
+- **Include**：属于核心研究范围。
+- **Related**：与核心问题相关的 repair、explainability、下游技术、背景或方法论文；保留并
+  可作为滚雪球 seed，但可在正文中与核心论文分开讨论。
+- **Exclude**：不符合范围，建议写下对应的排除理由。
+- **Later**：暂时无法判断，不能作为一轮完成时的最终状态。
 
-## 한국어
+每轮所有论文都需要人工最终决定，之后才能继续滚雪球。应经常保存，并保留可下载的 audit CSV。
 
-SurveyFlow는 문헌 검색, 초록 보강, AI 보조 선별, 수동 검토 및 인용
-스노우볼링을 지원하는 로컬 그래픽 문헌 검토 도구입니다.
+#### 3.7 滚雪球
 
-### 가장 빠른 시작 방법
+Include 和 Related 论文共同作为 seed。每轮收集 backward references 与 forward citations，
+再与所有已审论文去重，然后重复规则筛选、标题 AI 预筛、venue/摘要补全、摘要级 AI 建议和
+人工审阅。References per seed 与 Citations per seed 是数量上限，不是相关性阈值。
 
-프로젝트의 GitHub Releases 페이지에서 `SurveyFlow-quickstart.zip`을 다운로드하고
-압축을 푼 후 다음과 같이 실행합니다.
+“Converged”只表示在当前 seed、数据源和数量限制下，没有新的唯一论文进入下一轮审阅队列；
+它不证明全世界不存在遗漏文献。也可以根据预先写明的停止规则主动结束。
 
-**Windows:** `start.bat`을 두 번 클릭합니다.
+#### 3.8 结果
 
-**macOS / Linux:** 압축을 푼 폴더에서 터미널을 열고 실행합니다.
+至少完成一轮人工审阅后，点击 **Generate final exports**。页面展示审阅轮数、全部审计论文、
+最终纳入论文和排除数量，并按年份和 venue type 作图。可下载：
 
-```bash
-sh start.sh
-```
+- Included papers CSV：最终纳入及 Related 文献集。
+- Complete audit CSV：所有候选的来源、AI 输出、人工决定和备注。
+- Final report：Markdown 格式的筛选总结。
 
-<http://localhost:8501>을 엽니다. 처음 실행할 때 런처가 프로젝트 폴더 안에
-전용 `uv`, Python 및 필수 패키지를 자동으로 설치합니다. 시스템 Python은
-변경하지 않습니다. 최초 실행과 논문 검색에는 인터넷 연결이 필요합니다.
+发表 rank 或 IF 缺失应解释为“无法匹配”，不能解释为“质量低”。发表 survey 时应同时保存
+完整审计表和流程统计，以保证检索和筛选可追溯。
 
-SurveyFlow를 종료하려면 실행에 사용한 터미널로 돌아가 `Ctrl+C`를 누릅니다.
-Windows에서는 실행 창을 닫아도 앱이 종료됩니다.
+#### 3.9 AI 研究
 
-### Docker로 시작
+生成最终导出后才能使用。**Paper Q&A** 允许选择一篇最终论文、上传 PDF、单独选择模型并
+连续提问；PDF、远程 file id 和对话记忆按论文保存在本地，也可清空会话。
 
-Docker Desktop이 설치되어 있다면 다음을 실행합니다.
+**Corpus classification** 对最终文献集整体分类。用户可以用英文填写分类依据，例如 property、
+method、guarantee type、research objective 或 application domain；留空时由模型自己提出 taxonomy。
+结果包括分类数量图、逐篇 rationale、taxonomy JSON、classifications CSV 和 Markdown report。
 
-```bash
-docker compose up --build
-```
+AI 结论必须回到原文核查。运行 AI 时，所需文本或 PDF 会发送到设置的 API endpoint，只应
+上传获准处理的文档。
 
-<http://localhost:8501>을 엽니다. 종료하려면 `Ctrl+C`를 누른 후 다음을 실행합니다.
+### 4. 数据保存与常见问题
 
-```bash
-docker compose down
-```
+项目、运行 checkpoint、审阅表、导出文件、PDF、对话和分类结果保存在
+`data/app_projects/`；密钥单独保存在 `.secrets/app_projects/`。正常重启和按提供配置重建
+Docker 不会清除它们。新运行也不会删除旧运行，只会成为该项目当前显示的 run。
 
-### 앱 사용 순서
-
-1. 사이드바에서 인터페이스 언어를 선택합니다.
-2. 프로젝트를 만들고 연구 분야와 추천 데이터 소스를 선택한 다음 연구 질문, 연도 및
-   키워드 그룹을 입력합니다.
-3. **연구 범위** 페이지에서 데이터 소스 다중 선택을 조정하고 불리언 검색식을 확인합니다.
-4. AI 기능이 필요하면 **AI 설정**에서 OpenAI API 키를 입력하고 선별, 논문 Q&A,
-   문헌 집합 분류에 사용할 모델을 각각 선택합니다.
-5. **실행 센터**에서 검색을 시작합니다. 고재현율 배치 AI 제목 사전 선별을 사용하면
-   학술지/학회 정보와 초록 보강 전에 명확히 관련 없는 논문을 제외할 수 있습니다. 다른 페이지에
-   다녀와도 백그라운드 실행, 선별 수, 현재 단계, 진행률과 수집된 논문 수를 계속 확인할 수 있습니다.
-6. **논문 추가**에서 알고 있는 제목을 검색하거나 메타데이터를 직접 입력합니다. 검토
-   대기열을 만들기 전에 추가 항목을 동기화하세요.
-7. AI 보조 또는 수동 전용 선별을 선택하여 검토 대기열을 만듭니다.
-8. **수동 검토**에서 모든 논문의 최종 결정을 입력합니다.
-9. **스노우볼 검색**으로 인용을 확장한 후 **결과**에서 내보냅니다.
-10. **AI 연구**에서 PDF를 업로드하여 로컬 대화 기록이 유지되는 Q&A를 사용하거나,
-    직접 제공한 기준으로 전체 최종 문헌 집합을 분류합니다. 기준을 비워 두면 모델이
-    분류 체계를 제안합니다.
-
-DBLP, OpenAlex, Crossref, arXiv 및 PubMed는 실시간 검색을 지원합니다. OpenAIRE와
-Europeana는 전문 데이터 소스로 지원 예정 상태이며 아직 선택할 수 없습니다. 인문학,
-예술, 디자인, 건축 프로젝트는 광범위한 학술 색인을 기본으로 사용하고 누락된 도서,
-전시 도록 또는 지역 출판물을 수동으로 추가할 수 있습니다.
-
-AI 제안은 사람의 최종 결정을 대체하지 않습니다. 프로젝트와 결과는
-`data/app_projects/`에 저장되고 API 키는 `.secrets/app_projects/`에 별도로
-저장됩니다. Docker 이미지를 다시 빌드해도 이 데이터는 유지됩니다.
-업로드한 PDF, 대화, 분류 체계, 분류 결과 및 분석 보고서도 프로젝트 폴더에 로컬로 저장됩니다.
-AI 기능을 실행하면 필요한 논문 텍스트 또는 PDF가 설정된 API 엔드포인트로 전송됩니다.
-처리가 허용된 문서만 업로드하세요.
-
-이미 `uv`가 설치되어 있다면 `uv sync --no-dev`와
-`uv run vnn-survey-app`을 실행하면 됩니다.
+遇到大量无关论文时，先检查关键词是否正确分成“组内 OR、组间 AND”，再启用标题 AI 预筛；
+不要用大量宽泛标题排除词代替正确查询。摘要慢时查看 429 和等待统计，配置多个 fallback、
+必要密钥与联系邮箱，并先小批测试。已知论文缺失时使用**添加论文**，不要为了单篇遗漏不断
+放宽全部关键词。
 
 ---
 
-Maintainers can rebuild the downloadable package with `make package`.
+## 日本語
+
+SurveyFlow は、複数データソースの検索、ルール選別、抄録補完、任意の AI 推奨、
+人による最終レビュー、引用スノーボール、出力、PDF Q&A、コーパス分類をまとめた
+ローカル実行の文献レビュー用 GUI です。
+
+### 1. 入力言語
+
+画面は日本語で利用できますが、**すべての研究用入力は英語を推奨します**。プロジェクト名、
+Research question、Scope description、キーワード、採用・除外基準、タイトル除外語、prompt、
+レビュー注記、分類基準を英語で統一すると、英語中心の学術索引と AI の判定が安定します。
+非英語文献を対象にする場合は、英語語彙を残したまま、同じキーワード・グループへ必要な
+現地語の同義語を追加してください。英語の完全な入力例は
+[Transformer Verification Survey](#4-worked-example-transformer-verification-survey) を参照してください。
+
+### 2. 起動と終了
+
+GitHub Releases から `SurveyFlow-quickstart.zip` をダウンロードして展開します。
+Windows は `start.bat` をダブルクリックし、macOS / Linux は次を実行します。
+
+```bash
+sh start.sh
+```
+
+<http://localhost:8501> を開きます。初回はフォルダー内に専用の `uv`、Python、依存関係を
+自動で導入し、システム Python は変更しません。終了するには起動ターミナルで `Ctrl+C` を
+押します。`uv` がある場合は `uv sync --no-dev`、`uv run vnn-survey-app` でも起動できます。
+Docker の場合は `docker compose up --build`、終了は `docker compose down` です。
+
+### 3. 各ページ
+
+#### 3.1 Scope
+
+研究分野、データソース、研究課題、対象年、範囲説明、キーワード、採用・除外基準、タイトル
+除外語、arXiv / informal records の扱いを定義します。同じ行の語は OR、異なる行は AND です。
+同じグループへ語を加えると検索が広がり、新しいグループを加えると狭まります。空白は語句の
+一部であり AND ではありません。Query preview を確認し、範囲変更後は AI settings で
+**Regenerate from scope** を実行します。
+
+#### 3.2 Sources
+
+DBLP はコンピューターサイエンス、OpenAlex は学際検索と引用、Crossref は DOI メタデータ、
+arXiv は定量分野のプレプリント、PubMed は生物医学に適しています。単一データベースは完全では
+ありません。OpenAIRE と Europeana は計画中で、現在ライブ検索できません。既知の欠落資料は
+Add papers から補います。
+
+#### 3.3 AI settings
+
+公式 OpenAI API では Base URL を `https://api.openai.com/v1` のまま使用します。
+screening、PDF Q&A、corpus analysis のモデルは個別に選択できます。OpenAI key は AI 機能、
+無料 OpenAlex key は継続的な検索・抄録・引用に使います。Semantic Scholar / NCBI key と
+scholarly contact email は任意です。キー入力後は対応する **Apply** を押してください。
+
+既存の抄録が最優先で、欠落分だけを設定順に arXiv、PubMed、Crossref、Semantic Scholar、
+OpenAlex などへ問い合わせます。成功した時点で次の provider には進みません。batch size は
+上限として働き、サービス別制限は自動適用されます。prompt は直接編集でき、範囲変更後に再生成します。
+
+#### 3.4 Run center
+
+Query / Abstract limit の `0` は全件を意味し、小さい値はテスト用です。AI title prescreen は
+抄録取得前に明らかな無関係タイトルだけを高再現率で除き、AI abstract screening は抄録取得後に
+詳細な推奨を作ります。Run ID、工程、件数、進捗、保存時刻、各工程の入力・除外・保持数を確認でき、
+フロー SVG と counts JSON をダウンロードできます。
+
+**Stop run** は現在の安全なリクエスト境界で停止するため、即時ではない場合があります。
+**Resume run** は最新 checkpoint から再開します。**Start a new initial run** は旧ファイルを
+残したまま別の run を最初から作成する操作です。
+
+#### 3.5 Add papers
+
+既知タイトルをデータソースで検索して一致を確認するか、title、authors、year、venue、type、DOI、
+URL、追加理由を手入力します。重複は統合されます。最初の review queue を作る前に
+**Synchronize manual papers** を実行してください。既に audit がある場合は履歴を守るため新しい
+initial run を作ります。
+
+#### 3.6 Manual review
+
+AI は推奨にすぎず、人の判定が最終結果です。各論文を Include、Related、Exclude のいずれかに
+決定し、Later は一時保留にだけ使います。Related は修復、説明可能性、背景、下流技術など、核心と
+分けて保持したい文献に使えます。全件を確定して保存しないと次の snowball round へ進めません。
+
+#### 3.7 Snowball
+
+Include と Related を seed とし、後方参考文献と前方引用を取得します。既査読文献と重複排除した後、
+同じ選別・補完・人手レビューを繰り返します。Converged は現在の seed、データソース、上限のもとで
+新しいユニーク文献が review queue に入らなかったことを意味し、完全性の証明ではありません。
+
+#### 3.8 Results and AI research
+
+Results は included corpus、complete audit、Markdown report を作成し、年別・venue type 別集計を
+表示します。rank / IF の空欄は不明値です。AI research では最終文献の PDF Q&A を会話履歴付きで
+利用でき、任意基準またはモデル提案 taxonomy による全体分類を JSON、CSV、Markdown で保存できます。
+AI 出力は必ず原論文で確認し、処理許可のある PDF だけをアップロードしてください。
+
+### 4. 保存場所
+
+プロジェクト、checkpoint、audit、出力、PDF、会話、分類結果は `data/app_projects/`、API キーは
+`.secrets/app_projects/` に保存されます。通常の再起動や提供設定での Docker 再構築では削除されません。
+
+---
+
+## 한국어
+
+SurveyFlow는 다중 데이터 소스 검색, 규칙 선별, 초록 보강, 선택적 AI 추천, 사람의 최종 검토,
+인용 스노우볼링, 결과 내보내기, PDF Q&A 및 문헌 집합 분류를 하나로 묶은 로컬 GUI입니다.
+
+### 1. 입력 언어
+
+화면은 한국어로 사용할 수 있지만 **모든 연구 관련 필드는 영어로 입력하는 것을 권장합니다**.
+프로젝트 이름, Research question, Scope description, 키워드, 포함/제외 기준, 제목 제외어, prompt,
+검토 메모와 분류 기준을 영어로 통일하면 영어 중심 학술 색인과 AI 판단의 일관성이 좋아집니다.
+비영어 문헌을 조사할 때는 영어 용어를 유지하고 같은 키워드 그룹에 필요한 현지어 동의어를 추가하세요.
+전체 영어 입력 예시는 [Transformer Verification Survey](#4-worked-example-transformer-verification-survey)를
+참고하세요.
+
+### 2. 시작과 종료
+
+GitHub Releases에서 `SurveyFlow-quickstart.zip`을 다운로드해 압축을 풉니다. Windows에서는
+`start.bat`을 두 번 클릭하고, macOS / Linux에서는 다음을 실행합니다.
+
+```bash
+sh start.sh
+```
+
+<http://localhost:8501>을 엽니다. 최초 실행 시 폴더 안에 전용 `uv`, Python 및 의존성을 설치하며
+시스템 Python은 변경하지 않습니다. 종료하려면 실행 터미널에서 `Ctrl+C`를 누르세요. `uv`가 이미
+있다면 `uv sync --no-dev`와 `uv run vnn-survey-app`을 사용할 수 있습니다. Docker는
+`docker compose up --build`로 시작하고 `docker compose down`으로 종료합니다.
+
+### 3. 각 페이지
+
+#### 3.1 Scope
+
+연구 분야, 데이터 소스, 연구 질문, 연도, 범위 설명, 키워드, 포함/제외 기준, 제목 제외어,
+arXiv 및 informal record 보존 여부를 정의합니다. 같은 행의 용어는 OR, 서로 다른 행은 AND입니다.
+기존 그룹에 용어를 추가하면 넓어지고 새 그룹을 추가하면 좁아집니다. 공백은 구문의 일부이며 별도의
+AND가 아닙니다. Query preview를 확인하고 범위를 바꾼 뒤 AI settings의 **Regenerate from scope**를
+실행하세요.
+
+#### 3.2 Sources
+
+DBLP는 컴퓨터 과학, OpenAlex는 다학제 검색과 인용, Crossref는 DOI 메타데이터, arXiv는 정량 분야
+프리프린트, PubMed는 생의학에 적합합니다. 하나의 데이터베이스만으로는 완전하지 않습니다.
+OpenAIRE와 Europeana는 계획 단계라 현재 실시간 검색할 수 없습니다. 알려진 누락 자료는 Add papers로
+보완하세요.
+
+#### 3.3 AI settings
+
+공식 OpenAI API에서는 Base URL `https://api.openai.com/v1`을 유지합니다. screening, PDF Q&A,
+corpus analysis 모델을 각각 선택할 수 있습니다. OpenAI key는 AI 기능에, 무료 OpenAlex key는 지속적인
+검색, 초록, 인용 조회에 사용됩니다. Semantic Scholar / NCBI key와 scholarly contact email은
+선택 사항입니다. 키를 입력한 뒤 해당 **Apply** 버튼을 눌러야 합니다.
+
+검색 중 받은 초록을 먼저 보존하고, 누락된 논문만 설정한 우선순서대로 provider에 요청합니다. 성공하면
+그 논문은 뒤 provider로 보내지지 않습니다. batch size는 최대값이며 서비스별 제한은 자동 적용됩니다.
+prompt는 편집할 수 있고 연구 범위를 바꾼 후 다시 생성해야 합니다.
+
+#### 3.4 Run center
+
+Query / Abstract limit의 `0`은 전체를 의미하고 작은 값은 테스트용입니다. AI title prescreen은 초록
+보강 전에 명확히 무관한 제목을 고재현율로 제거하고, AI abstract screening은 제목과 초록으로 더 자세한
+추천을 만듭니다. Run ID, 작업, 수집 논문 수, 진행률, 마지막 저장 시각과 각 단계의 입력/제외/유지 수를
+볼 수 있으며 flow SVG와 counts JSON을 받을 수 있습니다.
+
+**Stop run**은 현재 네트워크 요청이나 AI batch가 안전하게 끝난 뒤 중지하므로 즉시 멈추지 않을 수
+있습니다. **Resume run**은 최근 checkpoint에서 계속합니다. **Start a new initial run**은 기존 파일을
+보존하면서 첫 단계부터 별도 run을 만드는 기능입니다.
+
+#### 3.5 Add papers
+
+알고 있는 제목을 선택한 소스에서 찾아 올바른 메타데이터를 확인하거나 title, authors, year, venue,
+publication type, DOI, URL과 추가 이유를 직접 입력합니다. 기록은 중복 제거됩니다. 첫 review queue를
+만들기 전에 **Synchronize manual papers**를 누르세요. audit이 이미 존재하면 기록을 다시 쓰지 않고
+새 initial run으로 포함합니다.
+
+#### 3.6 Manual review
+
+AI는 추천만 제공하며 사람의 결정이 최종 결과입니다. 각 논문을 Include, Related, Exclude로 확정하고
+Later는 임시 보류에만 사용합니다. Related는 repair, explainability, 배경 또는 관련 하위 기술을 핵심
+문헌과 구분해 보존할 때 사용할 수 있습니다. 모든 논문을 확정하고 저장해야 다음 snowball round로
+진행할 수 있습니다.
+
+#### 3.7 Snowball
+
+Include와 Related 논문을 seed로 삼아 참고문헌과 인용 논문을 수집합니다. 기존 모든 검토 논문과 중복을
+제거한 뒤 같은 선별, 보강, 사람 검토를 반복합니다. Converged는 현재 seed, 소스, 제한에서 새 고유 논문이
+review queue에 들어오지 않았다는 뜻이며 완전성을 증명하지 않습니다.
+
+#### 3.8 Results and AI research
+
+Results는 included corpus, complete audit, Markdown report를 만들고 연도와 venue type 분포를 표시합니다.
+rank / IF 공란은 알 수 없는 값입니다. AI research에서는 최종 논문의 PDF를 대화 기억과 함께 질문하거나,
+사용자 기준 또는 모델이 제안한 taxonomy로 전체 문헌을 분류해 JSON, CSV, Markdown으로 저장할 수 있습니다.
+AI 결과는 원문으로 검증하고 처리 권한이 있는 PDF만 업로드하세요.
+
+### 4. 저장 위치
+
+프로젝트, checkpoint, audit, 내보내기, PDF, 대화 및 분류 결과는 `data/app_projects/`에 저장되고 API
+키는 `.secrets/app_projects/`에 별도로 저장됩니다. 일반 재시작과 제공된 설정의 Docker 재빌드에서는
+삭제되지 않습니다.

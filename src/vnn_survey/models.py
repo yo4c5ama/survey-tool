@@ -19,6 +19,8 @@ class PaperRecord:
     dblp_key: str | None = None
     publication_type: str | None = None
     provider_id: str | None = None
+    abstract: str | None = None
+    abstract_source: str | None = None
     discovery_sources: list[str] = field(default_factory=list)
     discovery_queries: list[str] = field(default_factory=list)
     manual_added: bool = False
@@ -83,6 +85,8 @@ class PaperRecord:
             dblp_key=_optional_text(value.get("dblp_key")),
             publication_type=_optional_text(value.get("publication_type")),
             provider_id=_optional_text(value.get("provider_id")),
+            abstract=_optional_text(value.get("abstract")),
+            abstract_source=_optional_text(value.get("abstract_source")),
             discovery_sources=[str(item) for item in sources],
             discovery_queries=[str(item) for item in queries],
             manual_added=bool(value.get("manual_added", False)),

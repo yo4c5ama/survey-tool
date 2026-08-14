@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -80,9 +81,18 @@ class OpenAlexProvider:
         self.config = config
         self.years = years
         self.session = _session("SurveyFlow/0.1 OpenAlex literature discovery")
+        if not os.environ.get(self.config.openalex_api_key_env, "").strip():
+            raise RuntimeError(
+                "OpenAlex requires an API key for sustained use. Add a free key on AI settings."
+            )
 
     def search(self, query: str, limit: int | None = None) -> SourceSearchResult:
         records: list[PaperRecord] = []
+        api_key = os.environ.get(self.config.openalex_api_key_env, "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "OpenAlex requires an API key for sustained use. Add a free key on AI settings."
+            )
         per_page, max_pages = _page_limits(self.config, limit, provider_cap=200)
         for page in range(1, max_pages + 1):
             params: dict[str, Any] = {
@@ -93,7 +103,6 @@ class OpenAlexProvider:
             filters = _date_filters(self.years)
             if filters:
                 params["filter"] = ",".join(filters)
-            api_key = os.environ.get(self.config.openalex_api_key_env, "").strip()
             email = os.environ.get(self.config.openalex_email_env, "").strip()
             if api_key:
                 params["api_key"] = api_key
@@ -346,6 +355,10 @@ def _parse_openalex_work(item: dict[str, Any], query: str) -> PaperRecord:
         publication_type=str(item.get("type_crossref") or item.get("type") or "").strip()
         or None,
         provider_id=_provider_id(item.get("id")),
+        abstract=_reconstruct_openalex_abstract(item.get("abstract_inverted_index")) or None,
+        abstract_source="openalex"
+        if item.get("abstract_inverted_index")
+        else None,
         raw=item,
     )
 
@@ -378,6 +391,8 @@ def _parse_crossref_work(item: dict[str, Any], query: str) -> PaperRecord:
         or None,
         publication_type=str(item.get("subtype") or item.get("type") or "").strip() or None,
         provider_id=doi,
+        abstract=_crossref_abstract(item.get("abstract")) or None,
+        abstract_source="crossref" if item.get("abstract") else None,
         raw=item,
     )
 
@@ -390,6 +405,7 @@ def _parse_arxiv_feed(payload: str, query: str) -> list[PaperRecord]:
         identifier = _element_text(entry.find("atom:id", namespace))
         provider_id = identifier.rstrip("/").rsplit("/", 1)[-1]
         published = _element_text(entry.find("atom:published", namespace))
+        abstract = _collapse(_element_text(entry.find("atom:summary", namespace)))
         links = {
             str(link.attrib.get("rel") or ""): str(link.attrib.get("href") or "")
             for link in entry.findall("atom:link", namespace)
@@ -409,6 +425,8 @@ def _parse_arxiv_feed(payload: str, query: str) -> list[PaperRecord]:
                 url=links.get("alternate") or identifier or None,
                 publication_type="preprint",
                 provider_id=provider_id or None,
+                abstract=abstract or None,
+                abstract_source="arxiv" if abstract else None,
                 raw={"id": identifier, "published": published},
             )
         )
@@ -426,6 +444,7 @@ def _parse_pubmed_xml(payload: str, query: str) -> list[PaperRecord]:
         pmid = _element_text(citation.find("PMID"))
         journal = article.find("Journal")
         venue = _element_text(journal.find("Title")) if journal is not None else ""
+        abstract = _pubmed_abstract(article)
         records.append(
             PaperRecord(
                 title=_collapse(_element_text(article.find("ArticleTitle"))),
@@ -441,10 +460,49 @@ def _parse_pubmed_xml(payload: str, query: str) -> list[PaperRecord]:
                 )
                 or "journal article",
                 provider_id=pmid or None,
+                abstract=abstract or None,
+                abstract_source="pubmed" if abstract else None,
                 raw={"pmid": pmid},
             )
         )
     return records
+
+
+def _reconstruct_openalex_abstract(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    words: list[tuple[int, str]] = []
+    for word, positions in value.items():
+        if not isinstance(positions, list):
+            continue
+        for position in positions:
+            try:
+                words.append((int(position), str(word)))
+            except (TypeError, ValueError):
+                continue
+    return " ".join(word for _, word in sorted(words)).strip()
+
+
+def _crossref_abstract(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        root = ET.fromstring(f"<root>{text}</root>")
+        return _collapse(" ".join(root.itertext()))
+    except ET.ParseError:
+        return _collapse(html.unescape(re.sub(r"<[^>]+>", " ", text)))
+
+
+def _pubmed_abstract(article: ET.Element) -> str:
+    sections: list[str] = []
+    for node in article.findall("Abstract/AbstractText"):
+        text = _collapse(" ".join(node.itertext()))
+        if not text:
+            continue
+        label = str(node.attrib.get("Label") or "").strip()
+        sections.append(f"{label}: {text}" if label else text)
+    return " ".join(sections).strip()
 
 
 def _request_json(

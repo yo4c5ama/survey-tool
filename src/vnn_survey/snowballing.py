@@ -341,6 +341,10 @@ class OpenAlexSnowballClient:
         self.cache_dir = config.cache_dir
         self.api_key = os.environ.get(config.openalex_api_key_env, "").strip()
         self.email = os.environ.get(config.openalex_email_env, "").strip()
+        if not self.api_key:
+            raise RuntimeError(
+                "OpenAlex requires an API key for sustained use. Add a free key on AI settings."
+            )
 
     def resolve_seed(self, seed: SeedPaper) -> dict[str, Any] | None:
         if seed.openalex_id:

@@ -715,6 +715,9 @@ def _print_enrichment_summary(summary, output_path: Path, summary_path: Path) ->
     table.add_row("total", "eligible_rows", str(summary.eligible))
     table.add_row("total", "rows_with_abstract", str(summary.with_abstract))
     table.add_row("this_run", "attempted", str(summary.attempted))
+    table.add_row("this_run", "api_requests", str(getattr(summary, "api_requests", 0)))
+    table.add_row("this_run", "batch_requests", str(getattr(summary, "batch_requests", 0)))
+    table.add_row("this_run", "cache_hits", str(getattr(summary, "cache_hits", 0)))
     for value, count in summary.by_status.most_common():
         table.add_row("status", value or "empty", str(count))
     for value, count in summary.by_source.most_common():

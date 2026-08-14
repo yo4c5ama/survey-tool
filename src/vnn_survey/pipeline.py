@@ -287,6 +287,14 @@ def _merge_records(left: PaperRecord, right: PaperRecord) -> PaperRecord:
     primary = right if right_score > left_score else left
     return replace(
         primary,
+        abstract=primary.abstract or left.abstract or right.abstract,
+        abstract_source=(
+            primary.abstract_source
+            if primary.abstract
+            else left.abstract_source
+            if left.abstract
+            else right.abstract_source
+        ),
         discovery_sources=_merge_values(
             left.discovery_sources,
             right.discovery_sources,
@@ -309,6 +317,7 @@ def _richness_score(record: PaperRecord) -> int:
             4 if not _is_informal(record) else 0,
             3 if record.source == "dblp" else 0,
             2 if record.doi else 0,
+            2 if record.abstract else 0,
             1 if record.url else 0,
             1 if record.venue else 0,
             1 if record.year else 0,

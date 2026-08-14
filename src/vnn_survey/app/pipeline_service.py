@@ -26,6 +26,7 @@ from vnn_survey.app.audit import (
 )
 from vnn_survey.app.manual_papers import ManualPaperStore
 from vnn_survey.app.project_store import ProjectStore
+from vnn_survey.app.run_flow import build_flow_svg, flow_summary_payload, record_flow_stage
 from vnn_survey.app.task_manager import TaskCancelled, raise_if_cancelled
 from vnn_survey.config import load_config
 from vnn_survey.enrichment import enrich_candidates, write_enrichment_summary
@@ -124,6 +125,9 @@ class PipelineService:
             "options": {
                 "title_llm_enabled": use_title_llm,
                 "title_llm_batch_size": title_batch_size,
+                "limit_queries": limit_queries,
+                "enrich_limit": enrich_limit,
+                "core_online": core_online,
             },
             "rounds": [],
         }
@@ -169,6 +173,35 @@ class PipelineService:
             _write_json(run_dir / "run_summary.json", collection_summary)
             candidates = processed_dir / "candidate_papers.csv"
             _set_progress_paper_count(state, int(collection_summary["deduped_records"]))
+            round_state["files"]["candidates"] = str(candidates)
+            round_state["counts"].update(collection_summary)
+            raw_count = int(collection_summary["raw_records"])
+            filtered_count = int(collection_summary["filtered_records"])
+            deduped_count = int(collection_summary["deduped_records"])
+            record_flow_stage(
+                round_state,
+                key="literature_search",
+                label="Literature search",
+                input_count=raw_count,
+                retained_count=raw_count,
+                stage_type="discovery",
+                details={"sources": ", ".join(selected_sources)},
+            )
+            record_flow_stage(
+                round_state,
+                key="metadata_filter",
+                label="Metadata filters",
+                input_count=raw_count,
+                retained_count=filtered_count,
+            )
+            record_flow_stage(
+                round_state,
+                key="deduplication",
+                label="Deduplication",
+                input_count=filtered_count,
+                retained_count=deduped_count,
+            )
+            self._save_state(project_slug, state)
 
             _notify(
                 tracked_progress,
@@ -186,6 +219,19 @@ class PipelineService:
                     "by_exclusion_code": dict(screening_result.summary.by_exclusion_code),
                 },
             )
+            rule_excluded = screening_result.summary.by_decision.get("exclude", 0)
+            rule_retained = screening_result.summary.total - rule_excluded
+            round_state["files"]["screened"] = str(screened_path)
+            round_state["counts"]["rule_excluded"] = rule_excluded
+            record_flow_stage(
+                round_state,
+                key="rule_screening",
+                label="Rule screening",
+                input_count=screening_result.summary.total,
+                retained_count=rule_retained,
+                excluded_count=rule_excluded,
+            )
+            self._save_state(project_slug, state)
 
             title_input, title_result = self._title_prescreen(
                 project_slug,
@@ -204,6 +250,17 @@ class PipelineService:
                     **_title_screening_counts(title_result),
                 }
             )
+            if title_result is not None:
+                round_state["files"]["title_screened"] = str(title_input)
+                record_flow_stage(
+                    round_state,
+                    key="ai_title_screening",
+                    label="AI title screening",
+                    input_count=title_result.summary.eligible,
+                    retained_count=title_result.summary.kept_for_enrichment,
+                    excluded_count=title_result.summary.excluded,
+                    details={"cached": title_result.summary.cached},
+                )
             self._save_state(project_slug, state)
 
             _notify(
@@ -228,11 +285,38 @@ class PipelineService:
                 venue_result.summary,
                 processed_dir / "venue_quality_summary.json",
             )
+            enrichment_input_count = (
+                title_result.summary.kept_for_enrichment
+                if title_result is not None
+                else rule_retained
+            )
+            round_state["files"]["venues"] = str(venue_path)
+            record_flow_stage(
+                round_state,
+                key="venue_enrichment",
+                label="Venue enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+                details={
+                    "CORE ranks found": getattr(
+                        venue_result.summary,
+                        "conferences_with_core_rank",
+                        0,
+                    ),
+                    "impact factors found": getattr(
+                        venue_result.summary,
+                        "journals_with_impact_factor",
+                        0,
+                    ),
+                },
+            )
+            self._save_state(project_slug, state)
 
             _notify(
                 tracked_progress,
                 "Abstract enrichment",
-                "Looking up abstracts through OpenAlex.",
+                "Looking up missing abstracts through the configured provider chain.",
             )
             enriched_path = processed_dir / "candidate_papers_enriched.csv"
             enrichment_result = enrich_candidates(
@@ -244,26 +328,40 @@ class PipelineService:
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Abstract enrichment",
-                    "Looking up abstracts through OpenAlex.",
+                    "Looking up missing abstracts through the configured provider chain.",
                 ),
             )
             write_enrichment_summary(
                 enrichment_result.summary,
                 processed_dir / "abstract_enrichment_summary.json",
             )
+            round_state["files"]["enriched"] = str(enriched_path)
+            record_flow_stage(
+                round_state,
+                key="abstract_enrichment",
+                label="Abstract enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+                details={
+                    "abstracts found": enrichment_result.summary.with_abstract,
+                    "attempted": enrichment_result.summary.attempted,
+                    "API requests": getattr(enrichment_result.summary, "api_requests", 0),
+                    "batch requests": getattr(
+                        enrichment_result.summary,
+                        "batch_requests",
+                        0,
+                    ),
+                    "cache hits": getattr(enrichment_result.summary, "cache_hits", 0),
+                    "429 retries": getattr(
+                        enrichment_result.summary,
+                        "rate_limit_retries",
+                        0,
+                    ),
+                },
+            )
 
             round_state["status"] = "discovery_complete"
-            round_state["files"] = {
-                "candidates": str(candidates),
-                "screened": str(screened_path),
-                **(
-                    {"title_screened": str(title_input)}
-                    if title_result is not None
-                    else {}
-                ),
-                "venues": str(venue_path),
-                "enriched": str(enriched_path),
-            }
             round_state["counts"] = {
                 **collection_summary,
                 "manual_records": len(manual_records),
@@ -271,6 +369,33 @@ class PipelineService:
                 **_title_screening_counts(title_result),
                 "abstracts_found": enrichment_result.summary.with_abstract,
                 "abstracts_attempted": enrichment_result.summary.attempted,
+                "abstract_api_requests": getattr(
+                    enrichment_result.summary,
+                    "api_requests",
+                    0,
+                ),
+                "abstract_batch_requests": getattr(
+                    enrichment_result.summary,
+                    "batch_requests",
+                    0,
+                ),
+                "abstract_cache_hits": getattr(
+                    enrichment_result.summary,
+                    "cache_hits",
+                    0,
+                ),
+                "abstract_rate_limit_retries": getattr(
+                    enrichment_result.summary,
+                    "rate_limit_retries",
+                    0,
+                ),
+                "abstract_rate_limit_wait_seconds": (
+                    getattr(
+                        enrichment_result.summary,
+                        "rate_limit_wait_seconds",
+                        0,
+                    )
+                ),
             }
             state["status"] = "awaiting_ai_or_review"
             self._save_state(project_slug, state)
@@ -281,6 +406,322 @@ class PipelineService:
                 stage="Discovery complete",
                 message="The candidate set is ready for review preparation.",
                 paper_count=int(collection_summary["deduped_records"]),
+            )
+            return state
+        except TaskCancelled:
+            self._mark_cancelled(project_slug, state, round_state)
+            return state
+        except Exception as exc:
+            self._mark_failed(project_slug, state, round_state, exc)
+            raise
+
+    def resume_initial_discovery(
+        self,
+        project_slug: str,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """Continue an interrupted initial run from its persisted stage outputs."""
+
+        settings = self.store.load_project(project_slug)
+        state = self.load_current_state(project_slug)
+        round_state = _get_round(state, 0)
+        if round_state.get("kind") != "initial":
+            raise RuntimeError("The current run does not contain an initial discovery round.")
+        if round_state.get("status") == "discovery_complete":
+            return state
+
+        options = state.get("options", {})
+        source = str(state.get("source") or "auto")
+        selected_sources = list(state.get("sources") or settings.discovery_sources or ["dblp"])
+        limit_queries = _optional_int(options.get("limit_queries"))
+        enrich_limit = _optional_int(options.get("enrich_limit"))
+        core_online = bool(options.get("core_online", True))
+        use_title_llm = bool(options.get("title_llm_enabled", False))
+        title_batch_size = int(options.get("title_llm_batch_size", 100))
+        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
+            "OPENAI_API_KEY"
+        ):
+            raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
+
+        config = load_config(self.store.config_path(project_slug))
+        run_dir = self.store.project_dir(project_slug) / "runs" / state["run_id"]
+        processed_dir = run_dir / "processed"
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        candidates = processed_dir / "candidate_papers.csv"
+        screened_path = processed_dir / "candidate_papers_screened.csv"
+        title_path = processed_dir / "candidate_papers_title_screened.csv"
+        venue_path = processed_dir / "candidate_papers_venues.csv"
+        enriched_path = processed_dir / "candidate_papers_enriched.csv"
+
+        round_state["status"] = "running"
+        state["status"] = "running_discovery"
+        tracked_progress = self._begin_progress(
+            project_slug,
+            state,
+            operation="Resume initial discovery",
+            heading="Resuming initial discovery",
+            stages=_with_title_screening_stage(INITIAL_DISCOVERY_STAGES, use_title_llm),
+            callback=progress,
+            paper_count=_csv_row_count(candidates) if candidates.exists() else 0,
+        )
+
+        try:
+            manual_records = ManualPaperStore(self.store.project_dir(project_slug)).load()
+            _notify(
+                tracked_progress,
+                "Literature search",
+                "Reusing saved discovery records when available.",
+            )
+            if not candidates.exists():
+                result = collect_from_sources(
+                    config,
+                    console=Console(file=io.StringIO(), no_color=True),
+                    source_ids=selected_sources,
+                    limit_queries=limit_queries,
+                    dblp_mode=source,
+                    additional_records=manual_records,
+                    progress_callback=_counted_item_progress(
+                        tracked_progress,
+                        state,
+                        "Literature search",
+                        "Collecting bibliographic records from the selected sources.",
+                    ),
+                )
+                save_collection(result, output_dir=run_dir)
+                collection_summary = summarize(result)
+                _write_json(run_dir / "run_summary.json", collection_summary)
+            else:
+                collection_summary = _read_json(run_dir / "run_summary.json")
+                deduped = _csv_row_count(candidates)
+                collection_summary = {
+                    **round_state.get("counts", {}),
+                    **collection_summary,
+                    "raw_records": int(
+                        collection_summary.get("raw_records", deduped)
+                    ),
+                    "filtered_records": int(
+                        collection_summary.get("filtered_records", deduped)
+                    ),
+                    "deduped_records": deduped,
+                }
+
+            raw_count = int(collection_summary["raw_records"])
+            filtered_count = int(collection_summary["filtered_records"])
+            deduped_count = int(collection_summary["deduped_records"])
+            round_state["files"]["candidates"] = str(candidates)
+            round_state["counts"].update(collection_summary)
+            record_flow_stage(
+                round_state,
+                key="literature_search",
+                label="Literature search",
+                input_count=raw_count,
+                retained_count=raw_count,
+                stage_type="discovery",
+                details={"sources": ", ".join(selected_sources)},
+            )
+            record_flow_stage(
+                round_state,
+                key="metadata_filter",
+                label="Metadata filters",
+                input_count=raw_count,
+                retained_count=filtered_count,
+            )
+            record_flow_stage(
+                round_state,
+                key="deduplication",
+                label="Deduplication",
+                input_count=filtered_count,
+                retained_count=deduped_count,
+            )
+            _set_progress_paper_count(state, deduped_count)
+            self._save_state(project_slug, state)
+
+            _notify(
+                tracked_progress,
+                "Rule screening",
+                "Applying the project's title exclusion rules.",
+            )
+            screening_result = screen_candidates(candidates, screened_path, config.screening)
+            _write_json(
+                processed_dir / "screening_summary.json",
+                {
+                    "total": screening_result.summary.total,
+                    "by_decision": dict(screening_result.summary.by_decision),
+                    "by_bucket": dict(screening_result.summary.by_bucket),
+                    "by_exclusion_code": dict(
+                        screening_result.summary.by_exclusion_code
+                    ),
+                },
+            )
+            rule_excluded = screening_result.summary.by_decision.get("exclude", 0)
+            rule_retained = screening_result.summary.total - rule_excluded
+            round_state["files"]["screened"] = str(screened_path)
+            round_state["counts"]["rule_excluded"] = rule_excluded
+            record_flow_stage(
+                round_state,
+                key="rule_screening",
+                label="Rule screening",
+                input_count=screening_result.summary.total,
+                retained_count=rule_retained,
+                excluded_count=rule_excluded,
+            )
+            self._save_state(project_slug, state)
+
+            title_input, title_result = self._title_prescreen(
+                project_slug,
+                screened_path,
+                title_path,
+                enabled=use_title_llm,
+                batch_size=title_batch_size,
+                progress=tracked_progress,
+            )
+            round_state["counts"].update(_title_screening_counts(title_result))
+            if title_result is not None:
+                round_state["files"]["title_screened"] = str(title_input)
+                record_flow_stage(
+                    round_state,
+                    key="ai_title_screening",
+                    label="AI title screening",
+                    input_count=title_result.summary.eligible,
+                    retained_count=title_result.summary.kept_for_enrichment,
+                    excluded_count=title_result.summary.excluded,
+                    details={"cached": title_result.summary.cached},
+                )
+            enrichment_input_count = (
+                title_result.summary.kept_for_enrichment
+                if title_result is not None
+                else rule_retained
+            )
+            self._save_state(project_slug, state)
+
+            _notify(
+                tracked_progress,
+                "Venue enrichment",
+                "Reusing saved venue metadata when available.",
+            )
+            venue_summary = _read_json(processed_dir / "venue_quality_summary.json")
+            if not venue_path.exists():
+                venue_config = replace(config.venue_quality, core_online_enabled=core_online)
+                venue_result = enrich_venue_quality(
+                    title_input,
+                    venue_path,
+                    venue_config,
+                    decisions={"include_candidate", "needs_review"},
+                    progress_callback=_item_progress(
+                        tracked_progress,
+                        "Venue enrichment",
+                        "Adding publication type, CORE rank, and IF.",
+                    ),
+                )
+                write_venue_quality_summary(
+                    venue_result.summary,
+                    processed_dir / "venue_quality_summary.json",
+                )
+                venue_summary = {
+                    "conferences_with_core_rank": getattr(
+                        venue_result.summary,
+                        "conferences_with_core_rank",
+                        0,
+                    ),
+                    "journals_with_impact_factor": getattr(
+                        venue_result.summary,
+                        "journals_with_impact_factor",
+                        0,
+                    ),
+                }
+            round_state["files"]["venues"] = str(venue_path)
+            record_flow_stage(
+                round_state,
+                key="venue_enrichment",
+                label="Venue enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+                details={
+                    "CORE ranks found": int(
+                        venue_summary.get("conferences_with_core_rank", 0)
+                    ),
+                    "impact factors found": int(
+                        venue_summary.get("journals_with_impact_factor", 0)
+                    ),
+                },
+            )
+            self._save_state(project_slug, state)
+
+            _notify(
+                tracked_progress,
+                "Abstract enrichment",
+                "Continuing unfinished lookups through the configured provider chain.",
+            )
+            enrichment_result = enrich_candidates(
+                venue_path,
+                enriched_path,
+                config.enrichment,
+                decisions={"include_candidate", "needs_review"},
+                limit=enrich_limit,
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "Abstract enrichment",
+                    "Continuing unfinished lookups through the configured provider chain.",
+                ),
+            )
+            write_enrichment_summary(
+                enrichment_result.summary,
+                processed_dir / "abstract_enrichment_summary.json",
+            )
+            round_state["files"]["enriched"] = str(enriched_path)
+            round_state["counts"].update(
+                {
+                    "manual_records": len(manual_records),
+                    "abstracts_found": enrichment_result.summary.with_abstract,
+                    "abstracts_attempted": enrichment_result.summary.attempted,
+                    "abstract_api_requests": enrichment_result.summary.api_requests,
+                    "abstract_batch_requests": getattr(
+                        enrichment_result.summary,
+                        "batch_requests",
+                        0,
+                    ),
+                    "abstract_cache_hits": enrichment_result.summary.cache_hits,
+                    "abstract_rate_limit_retries": (
+                        enrichment_result.summary.rate_limit_retries
+                    ),
+                    "abstract_rate_limit_wait_seconds": (
+                        enrichment_result.summary.rate_limit_wait_seconds
+                    ),
+                }
+            )
+            record_flow_stage(
+                round_state,
+                key="abstract_enrichment",
+                label="Abstract enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+                details={
+                    "abstracts found": enrichment_result.summary.with_abstract,
+                    "attempted": enrichment_result.summary.attempted,
+                    "API requests": enrichment_result.summary.api_requests,
+                    "batch requests": getattr(
+                        enrichment_result.summary,
+                        "batch_requests",
+                        0,
+                    ),
+                    "cache hits": enrichment_result.summary.cache_hits,
+                    "429 retries": enrichment_result.summary.rate_limit_retries,
+                },
+            )
+
+            round_state["status"] = "discovery_complete"
+            state["status"] = "awaiting_ai_or_review"
+            self._save_state(project_slug, state)
+            self._complete_progress(
+                project_slug,
+                state,
+                progress,
+                stage="Discovery complete",
+                message="The candidate set is ready for review preparation.",
+                paper_count=deduped_count,
             )
             return state
         except TaskCancelled:
@@ -352,6 +793,23 @@ class PipelineService:
                 include_raw=True,
             )
             _set_progress_paper_count(state, len(merged))
+            initial_round["flow"] = [
+                stage
+                for stage in initial_round.get("flow", [])
+                if stage.get("key")
+                in {"literature_search", "metadata_filter", "deduplication"}
+            ]
+            record_flow_stage(
+                initial_round,
+                key="manual_additions",
+                label="Manual additions",
+                input_count=len(candidate_records),
+                retained_count=len(merged),
+                excluded_count=0,
+                stage_type="discovery",
+                details={"manual papers": len(manual_records)},
+            )
+            self._save_state(project_slug, state)
 
             _notify(
                 tracked_progress,
@@ -375,6 +833,17 @@ class PipelineService:
                     ),
                 },
             )
+            rule_excluded = screening_result.summary.by_decision.get("exclude", 0)
+            rule_retained = screening_result.summary.total - rule_excluded
+            initial_round["files"]["screened"] = str(screened_path)
+            record_flow_stage(
+                initial_round,
+                key="rule_screening",
+                label="Rule screening",
+                input_count=screening_result.summary.total,
+                retained_count=rule_retained,
+                excluded_count=rule_excluded,
+            )
 
             title_input, title_result = self._title_prescreen(
                 project_slug,
@@ -393,6 +862,17 @@ class PipelineService:
                     **_title_screening_counts(title_result),
                 }
             )
+            if title_result is not None:
+                initial_round["files"]["title_screened"] = str(title_input)
+                record_flow_stage(
+                    initial_round,
+                    key="ai_title_screening",
+                    label="AI title screening",
+                    input_count=title_result.summary.eligible,
+                    retained_count=title_result.summary.kept_for_enrichment,
+                    excluded_count=title_result.summary.excluded,
+                    details={"cached": title_result.summary.cached},
+                )
             self._save_state(project_slug, state)
 
             _notify(
@@ -417,11 +897,26 @@ class PipelineService:
                 venue_result.summary,
                 processed_dir / "venue_quality_summary.json",
             )
+            enrichment_input_count = (
+                title_result.summary.kept_for_enrichment
+                if title_result is not None
+                else rule_retained
+            )
+            initial_round["files"]["venues"] = str(venue_path)
+            record_flow_stage(
+                initial_round,
+                key="venue_enrichment",
+                label="Venue enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+            )
+            self._save_state(project_slug, state)
 
             _notify(
                 tracked_progress,
                 "Abstract enrichment",
-                "Looking up abstracts through OpenAlex.",
+                "Looking up missing abstracts through the configured provider chain.",
             )
             enriched_path = processed_dir / "candidate_papers_enriched.csv"
             enrichment_result = enrich_candidates(
@@ -433,12 +928,37 @@ class PipelineService:
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Abstract enrichment",
-                    "Looking up abstracts through OpenAlex.",
+                    "Looking up missing abstracts through the configured provider chain.",
                 ),
             )
             write_enrichment_summary(
                 enrichment_result.summary,
                 processed_dir / "abstract_enrichment_summary.json",
+            )
+            initial_round["files"]["enriched"] = str(enriched_path)
+            record_flow_stage(
+                initial_round,
+                key="abstract_enrichment",
+                label="Abstract enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+                details={
+                    "abstracts found": enrichment_result.summary.with_abstract,
+                    "attempted": enrichment_result.summary.attempted,
+                    "API requests": getattr(enrichment_result.summary, "api_requests", 0),
+                    "batch requests": getattr(
+                        enrichment_result.summary,
+                        "batch_requests",
+                        0,
+                    ),
+                    "cache hits": getattr(enrichment_result.summary, "cache_hits", 0),
+                    "429 retries": getattr(
+                        enrichment_result.summary,
+                        "rate_limit_retries",
+                        0,
+                    ),
+                },
             )
 
             initial_round["status"] = "discovery_complete"
@@ -464,6 +984,13 @@ class PipelineService:
                     **_title_screening_counts(title_result),
                     "abstracts_found": enrichment_result.summary.with_abstract,
                     "abstracts_attempted": enrichment_result.summary.attempted,
+                    "abstract_api_requests": enrichment_result.summary.api_requests,
+                    "abstract_batch_requests": getattr(
+                        enrichment_result.summary,
+                        "batch_requests",
+                        0,
+                    ),
+                    "abstract_cache_hits": enrichment_result.summary.cache_hits,
                 }
             )
             state["status"] = "awaiting_ai_or_review"
@@ -558,6 +1085,20 @@ class PipelineService:
                 round_state["files"]["llm_report"] = str(report_path)
                 round_state["counts"]["llm_screened"] = llm_result.summary.attempted
                 round_state["counts"]["llm_failed"] = llm_result.summary.by_status.get("failed", 0)
+                llm_excluded = llm_result.summary.by_decision.get("exclude", 0)
+                llm_retained = (
+                    llm_result.summary.by_decision.get("include", 0)
+                    + llm_result.summary.by_decision.get("maybe", 0)
+                )
+                record_flow_stage(
+                    round_state,
+                    key="ai_abstract_screening",
+                    label="AI abstract screening",
+                    input_count=llm_result.summary.eligible,
+                    retained_count=llm_retained,
+                    excluded_count=llm_excluded,
+                    details={"failed": llm_result.summary.by_status.get("failed", 0)},
+                )
             else:
                 _notify(
                     tracked_progress,
@@ -592,6 +1133,16 @@ class PipelineService:
                 }
             )
             round_state["counts"]["audit_queue"] = queue_count
+            recommendation_count = _csv_row_count(recommendation_path)
+            record_flow_stage(
+                round_state,
+                key="audit_queue",
+                label="Human review queue",
+                input_count=recommendation_count,
+                retained_count=queue_count,
+                excluded_count=max(recommendation_count - queue_count, 0),
+                stage_type="review",
+            )
             round_state["status"] = (
                 "converged" if round_index > 0 and queue_count == 0 else "ready_for_review"
             )
@@ -709,6 +1260,22 @@ class PipelineService:
                 snowball_result.summary,
                 processed_dir / f"snowballing_round_{round_index}_summary.json",
             )
+            round_state["files"]["snowballed"] = str(snowball_path)
+            round_state["files"]["seeds"] = str(seed_path)
+            record_flow_stage(
+                round_state,
+                key="citation_snowballing",
+                label="Citation snowballing",
+                input_count=snowball_result.summary.input_unique_rows,
+                retained_count=snowball_result.summary.output_rows,
+                excluded_count=0,
+                stage_type="discovery",
+                details={
+                    "new papers": snowball_result.summary.added_rows,
+                    "resolved seeds": snowball_result.summary.seeds_resolved,
+                },
+            )
+            self._save_state(project_slug, state)
 
             _notify(
                 tracked_progress,
@@ -717,6 +1284,17 @@ class PipelineService:
             )
             screened_path = processed_dir / f"candidate_papers_screened_round_{round_index}.csv"
             screening_result = screen_candidates(snowball_path, screened_path, config.screening)
+            rule_excluded = screening_result.summary.by_decision.get("exclude", 0)
+            rule_retained = screening_result.summary.total - rule_excluded
+            round_state["files"]["screened"] = str(screened_path)
+            record_flow_stage(
+                round_state,
+                key="rule_screening",
+                label="Rule screening",
+                input_count=screening_result.summary.total,
+                retained_count=rule_retained,
+                excluded_count=rule_excluded,
+            )
 
             title_input, title_result = self._title_prescreen(
                 project_slug,
@@ -735,6 +1313,17 @@ class PipelineService:
                     **_title_screening_counts(title_result),
                 }
             )
+            if title_result is not None:
+                round_state["files"]["title_screened"] = str(title_input)
+                record_flow_stage(
+                    round_state,
+                    key="ai_title_screening",
+                    label="AI title screening",
+                    input_count=title_result.summary.eligible,
+                    retained_count=title_result.summary.kept_for_enrichment,
+                    excluded_count=title_result.summary.excluded,
+                    details={"cached": title_result.summary.cached},
+                )
             self._save_state(project_slug, state)
 
             _notify(
@@ -759,6 +1348,21 @@ class PipelineService:
                 venue_result.summary,
                 processed_dir / f"venue_quality_round_{round_index}_summary.json",
             )
+            enrichment_input_count = (
+                title_result.summary.kept_for_enrichment
+                if title_result is not None
+                else rule_retained
+            )
+            round_state["files"]["venues"] = str(venue_path)
+            record_flow_stage(
+                round_state,
+                key="venue_enrichment",
+                label="Venue enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+            )
+            self._save_state(project_slug, state)
 
             _notify(
                 tracked_progress,
@@ -781,6 +1385,31 @@ class PipelineService:
             write_enrichment_summary(
                 enrichment_result.summary,
                 processed_dir / f"abstract_enrichment_round_{round_index}_summary.json",
+            )
+            round_state["files"]["enriched"] = str(enriched_path)
+            record_flow_stage(
+                round_state,
+                key="abstract_enrichment",
+                label="Abstract enrichment",
+                input_count=enrichment_input_count,
+                retained_count=enrichment_input_count,
+                stage_type="enrichment",
+                details={
+                    "abstracts found": enrichment_result.summary.with_abstract,
+                    "attempted": enrichment_result.summary.attempted,
+                    "API requests": getattr(enrichment_result.summary, "api_requests", 0),
+                    "batch requests": getattr(
+                        enrichment_result.summary,
+                        "batch_requests",
+                        0,
+                    ),
+                    "cache hits": getattr(enrichment_result.summary, "cache_hits", 0),
+                    "429 retries": getattr(
+                        enrichment_result.summary,
+                        "rate_limit_retries",
+                        0,
+                    ),
+                },
             )
 
             round_state["status"] = "discovery_complete"
@@ -807,6 +1436,13 @@ class PipelineService:
                     **_title_screening_counts(title_result),
                     "abstracts_found": enrichment_result.summary.with_abstract,
                     "abstracts_attempted": enrichment_result.summary.attempted,
+                    "abstract_api_requests": enrichment_result.summary.api_requests,
+                    "abstract_batch_requests": getattr(
+                        enrichment_result.summary,
+                        "batch_requests",
+                        0,
+                    ),
+                    "abstract_cache_hits": enrichment_result.summary.cache_hits,
                 }
             )
             state["status"] = "awaiting_ai_or_review"
@@ -914,6 +1550,20 @@ class PipelineService:
         summary = update_audit_rows(Path(round_state["files"]["audit"]), updates)
         round_state["counts"]["reviewed"] = summary.reviewed
         round_state["counts"]["unreviewed"] = summary.unreviewed
+        included = (
+            summary.by_decision.get("include", 0)
+            + summary.by_decision.get("include_related", 0)
+        )
+        record_flow_stage(
+            round_state,
+            key="human_audit",
+            label="Human audit",
+            input_count=summary.total,
+            retained_count=included,
+            excluded_count=summary.by_decision.get("exclude", 0),
+            stage_type="review",
+            details={"pending": summary.unreviewed},
+        )
         self._save_state(project_slug, state)
         return summary
 
@@ -949,6 +1599,16 @@ class PipelineService:
             "report": str(report_path),
             "included_count": included,
         }
+        record_flow_stage(
+            state["rounds"][-1],
+            key="final_corpus",
+            label="Final corpus",
+            input_count=unique,
+            retained_count=included,
+            excluded_count=max(unique - included, 0),
+            stage_type="review",
+            details={"audit rounds": len(audit_paths)},
+        )
         self._save_state(project_slug, state)
         return {"audit": cumulative_path, "included": included_path, "report": report_path}
 
@@ -1058,7 +1718,13 @@ class PipelineService:
 
     def _save_state(self, project_slug: str, state: dict[str, Any]) -> None:
         state["updated_at"] = _now()
-        _write_json(self._state_path(project_slug, state["run_id"]), state)
+        state_path = self._state_path(project_slug, state["run_id"])
+        _write_json(state_path, state)
+        _write_json(state_path.with_name("flow_summary.json"), flow_summary_payload(state))
+        state_path.with_name("flow_diagram.svg").write_text(
+            build_flow_svg(state),
+            encoding="utf-8",
+        )
 
     def _begin_progress(
         self,
@@ -1261,6 +1927,7 @@ def _new_round_state(index: int, kind: str) -> dict[str, Any]:
         "created_at": _now(),
         "files": {},
         "counts": {},
+        "flow": [],
         "error": "",
     }
 
@@ -1384,6 +2051,22 @@ def _round_paper_count(round_state: dict[str, Any]) -> int:
 
 def _csv_row_count(path: Path) -> int:
     return len(read_csv(path)[1])
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:

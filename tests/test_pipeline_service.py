@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from vnn_survey.ai_research import CorpusAnalysisResult
 from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
-from vnn_survey.app.task_manager import TaskManager, raise_if_cancelled
+from vnn_survey.app.task_manager import TaskCancelled, TaskManager, raise_if_cancelled
 from vnn_survey.models import PaperRecord
 from vnn_survey.pipeline import CollectionResult
 from vnn_survey.title_screening import TitleScreeningResult, TitleScreeningSummary
@@ -250,6 +250,95 @@ def test_cancelled_discovery_is_persisted_without_becoming_a_failure(
         assert not state["rounds"][0]["error"]
     finally:
         manager.shutdown()
+
+
+def test_cancelled_initial_discovery_resumes_same_run_from_saved_venue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
+    project = store.create_project(
+        name="Resume Test",
+        research_question="Which papers?",
+        scope_description="A test scope.",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    service = PipelineService(store)
+    record = PaperRecord(title="Checkpoint Paper", source="test", query="query", year=2025)
+    collection = CollectionResult([record], [record], [record], {}, {})
+    collect_calls = 0
+
+    def fake_collect(*_args, **_kwargs):
+        nonlocal collect_calls
+        collect_calls += 1
+        return collection
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.collect_from_sources",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.write_venue_quality_summary",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.write_enrichment_summary",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fake_venue(input_path, output_path, *_args, **_kwargs):
+        shutil.copyfile(input_path, output_path)
+        return SimpleNamespace(
+            summary=SimpleNamespace(
+                conferences_with_core_rank=0,
+                journals_with_impact_factor=0,
+            )
+        )
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.enrich_venue_quality",
+        fake_venue,
+    )
+    enrichment_calls = 0
+
+    def fake_enrichment(input_path, output_path, *_args, **_kwargs):
+        nonlocal enrichment_calls
+        enrichment_calls += 1
+        shutil.copyfile(input_path, output_path)
+        if enrichment_calls == 1:
+            raise TaskCancelled("stop after venue")
+        return SimpleNamespace(
+            summary=SimpleNamespace(
+                with_abstract=0,
+                attempted=1,
+                api_requests=1,
+                cache_hits=0,
+                rate_limit_retries=0,
+                rate_limit_wait_seconds=0,
+            )
+        )
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.enrich_candidates",
+        fake_enrichment,
+    )
+
+    stopped = service.start_initial_discovery(project.slug, source_ids=["dblp"])
+    run_id = stopped["run_id"]
+    assert stopped["status"] == "cancelled"
+    assert Path(stopped["rounds"][0]["files"]["venues"]).exists()
+
+    resumed = service.resume_initial_discovery(project.slug)
+
+    assert resumed["run_id"] == run_id
+    assert resumed["status"] == "awaiting_ai_or_review"
+    assert collect_calls == 1
+    assert enrichment_calls == 2
+    assert [stage["key"] for stage in resumed["rounds"][0]["flow"]][-1] == (
+        "abstract_enrichment"
+    )
 
 
 def test_initial_discovery_uses_title_decisions_before_abstract_enrichment(

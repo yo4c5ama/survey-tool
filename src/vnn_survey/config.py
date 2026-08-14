@@ -66,13 +66,18 @@ class ScreeningConfig:
 class EnrichmentConfig:
     providers: list[str]
     cache_dir: Path | None = None
+    batch_size: int = 100
     request_delay_seconds: float = 0.2
+    arxiv_request_delay_seconds: float = 3.0
     timeout_seconds: int = 30
     retries: int = 3
     min_title_similarity: float = 0.86
+    crossref_email_env: str = "CROSSREF_EMAIL"
     semantic_scholar_api_key_env: str = "SEMANTIC_SCHOLAR_API_KEY"
     openalex_api_key_env: str = "OPENALEX_API_KEY"
     openalex_email_env: str = "OPENALEX_EMAIL"
+    pubmed_api_key_env: str = "NCBI_API_KEY"
+    pubmed_email_env: str = "NCBI_EMAIL"
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,12 +272,24 @@ def load_config(path: Path) -> SurveyConfig:
             exclude_terms=[str(term) for term in screening.get("exclude_terms", [])],
         ),
         enrichment=EnrichmentConfig(
-            providers=list(enrichment.get("providers", ["openalex"])),
+            providers=list(
+                enrichment.get(
+                    "providers",
+                    ["arxiv", "pubmed", "crossref", "semantic_scholar", "openalex"],
+                )
+            ),
             cache_dir=Path(enrichment["cache_dir"]) if enrichment.get("cache_dir") else None,
+            batch_size=max(1, int(enrichment.get("batch_size", 100))),
             request_delay_seconds=float(enrichment.get("request_delay_seconds", 0.2)),
+            arxiv_request_delay_seconds=float(
+                enrichment.get("arxiv_request_delay_seconds", 3.0)
+            ),
             timeout_seconds=int(enrichment.get("timeout_seconds", 30)),
             retries=int(enrichment.get("retries", 3)),
             min_title_similarity=float(enrichment.get("min_title_similarity", 0.86)),
+            crossref_email_env=str(
+                enrichment.get("crossref_email_env", "CROSSREF_EMAIL")
+            ),
             semantic_scholar_api_key_env=str(
                 enrichment.get(
                     "semantic_scholar_api_key_env",
@@ -281,6 +298,10 @@ def load_config(path: Path) -> SurveyConfig:
             ),
             openalex_api_key_env=str(enrichment.get("openalex_api_key_env", "OPENALEX_API_KEY")),
             openalex_email_env=str(enrichment.get("openalex_email_env", "OPENALEX_EMAIL")),
+            pubmed_api_key_env=str(
+                enrichment.get("pubmed_api_key_env", "NCBI_API_KEY")
+            ),
+            pubmed_email_env=str(enrichment.get("pubmed_email_env", "NCBI_EMAIL")),
         ),
         venue_quality=VenueQualityConfig(
             core_rankings_path=Path(venue_quality["core_rankings_path"])

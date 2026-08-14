@@ -49,6 +49,17 @@ class ProjectSettings:
     paper_qa_model: str = "gpt-5.4"
     corpus_analysis_model: str = "gpt-5.4"
     llm_base_url: str = "https://api.openai.com/v1"
+    abstract_providers: list[str] = field(
+        default_factory=lambda: [
+            "arxiv",
+            "pubmed",
+            "crossref",
+            "semantic_scholar",
+            "openalex",
+        ]
+    )
+    abstract_batch_size: int = 100
+    scholarly_api_email: str = ""
     created_at: str = ""
     updated_at: str = ""
     current_run_id: str = ""
@@ -87,6 +98,15 @@ class ProjectSettings:
                 or "gpt-5.4"
             ),
             llm_base_url=str(value.get("llm_base_url") or "https://api.openai.com/v1"),
+            abstract_providers=[
+                str(item)
+                for item in value.get(
+                    "abstract_providers",
+                    ["arxiv", "pubmed", "crossref", "semantic_scholar", "openalex"],
+                )
+            ],
+            abstract_batch_size=max(1, int(value.get("abstract_batch_size") or 100)),
+            scholarly_api_email=str(value.get("scholarly_api_email") or ""),
             created_at=str(value.get("created_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
             current_run_id=str(value.get("current_run_id") or ""),
@@ -191,7 +211,19 @@ class ProjectStore:
         path = self.project_dir(slug) / "project.json"
         if not path.exists():
             raise FileNotFoundError(f"Survey project does not exist: {slug}")
-        return ProjectSettings.from_dict(_read_json(path))
+        value = _read_json(path)
+        settings = ProjectSettings.from_dict(value)
+        if any(
+            field not in value
+            for field in (
+                "abstract_providers",
+                "abstract_batch_size",
+                "scholarly_api_email",
+            )
+        ):
+            _write_json(path, settings.to_dict())
+            self._write_project_configs(settings)
+        return settings
 
     def save_project(self, settings: ProjectSettings) -> None:
         _validate_project_input(
@@ -228,6 +260,15 @@ class ProjectStore:
     def api_key_path(self, slug: str) -> Path:
         return self.secrets_root / slug / "openai_api_key"
 
+    def openalex_api_key_path(self, slug: str) -> Path:
+        return self.secrets_root / slug / "openalex_api_key"
+
+    def semantic_scholar_api_key_path(self, slug: str) -> Path:
+        return self.secrets_root / slug / "semantic_scholar_api_key"
+
+    def ncbi_api_key_path(self, slug: str) -> Path:
+        return self.secrets_root / slug / "ncbi_api_key"
+
     def save_api_key(self, slug: str, api_key: str) -> Path:
         value = api_key.strip()
         if not value:
@@ -245,6 +286,55 @@ class ProjectStore:
     def read_api_key(self, slug: str) -> str:
         try:
             return self.api_key_path(slug).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+
+    def save_openalex_api_key(self, slug: str, api_key: str) -> Path:
+        value = api_key.strip()
+        if not value:
+            raise ValueError("The OpenAlex API key cannot be empty.")
+        path = self.openalex_api_key_path(slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+        path.chmod(0o600)
+        return path
+
+    def read_openalex_api_key(self, slug: str) -> str:
+        try:
+            return self.openalex_api_key_path(slug).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
+
+    def save_semantic_scholar_api_key(self, slug: str, api_key: str) -> Path:
+        return self._save_provider_key(
+            self.semantic_scholar_api_key_path(slug),
+            api_key,
+            "Semantic Scholar",
+        )
+
+    def read_semantic_scholar_api_key(self, slug: str) -> str:
+        return self._read_provider_key(self.semantic_scholar_api_key_path(slug))
+
+    def save_ncbi_api_key(self, slug: str, api_key: str) -> Path:
+        return self._save_provider_key(self.ncbi_api_key_path(slug), api_key, "NCBI")
+
+    def read_ncbi_api_key(self, slug: str) -> str:
+        return self._read_provider_key(self.ncbi_api_key_path(slug))
+
+    @staticmethod
+    def _save_provider_key(path: Path, api_key: str, provider: str) -> Path:
+        value = api_key.strip()
+        if not value:
+            raise ValueError(f"The {provider} API key cannot be empty.")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+        path.chmod(0o600)
+        return path
+
+    @staticmethod
+    def _read_provider_key(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
             return ""
 
@@ -334,15 +424,20 @@ class ProjectStore:
                 "retries": 3,
             },
             "enrichment": {
-                "providers": ["openalex"],
+                "providers": settings.abstract_providers,
                 "cache_dir": str(project_dir / "cache" / "abstracts"),
+                "batch_size": settings.abstract_batch_size,
                 "request_delay_seconds": 0.2,
+                "arxiv_request_delay_seconds": 3.0,
                 "timeout_seconds": 30,
                 "retries": 3,
                 "min_title_similarity": 0.86,
+                "crossref_email_env": "CROSSREF_EMAIL",
                 "semantic_scholar_api_key_env": "SEMANTIC_SCHOLAR_API_KEY",
                 "openalex_api_key_env": "OPENALEX_API_KEY",
                 "openalex_email_env": "OPENALEX_EMAIL",
+                "pubmed_api_key_env": "NCBI_API_KEY",
+                "pubmed_email_env": "NCBI_EMAIL",
             },
             "venue_quality": {
                 "core_rankings_path": str(
