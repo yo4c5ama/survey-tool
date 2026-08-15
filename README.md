@@ -13,7 +13,6 @@ snowballing, final export, PDF question answering, and corpus classification.
 flowchart TD
     A["Define the research scope<br/>Question, years, keywords, criteria, and sources"] --> B["Search selected literature sources"]
     B --> C["Normalize and deduplicate records"]
-    P["Add known papers manually"] -- "Before a review queue exists" --> C
     C --> E["Apply rule-based title exclusions"]
     E --> T{"Use batched AI title prescreen?"}
     T -- Yes --> U["Keep relevant or ambiguous titles<br/>Cache every title decision"]
@@ -24,10 +23,7 @@ flowchart TD
     F -- No --> H["Create a human-only review queue"]
     G --> H
     H --> I["Human audit<br/>Include, related, exclude, or review later"]
-    I -- "Add known papers" --> Q["Queue researcher additions"]
-    Q --> V["Enrich venue type, rank, and IF"]
-    V --> W["Enrich missing abstracts"]
-    W -- "Return enriched papers" --> H
+    I -- "Add known papers" --> D
     I --> J{"Run citation snowballing?"}
     J -- Yes --> K["Collect references and citing works<br/>from included and related papers"]
     K --> C
@@ -40,7 +36,9 @@ AI screening is optional and produces recommendations only. A human reviewer
 makes the final inclusion decision in the initial discovery round and every
 snowballing round. The Run Center records the number of papers entering,
 leaving, and remaining after each stage. Enrichment stages add metadata and do
-not remove records.
+not remove records. The **Add known papers** loop always performs abstract-level
+AI screening; every manual addition returns to Human audit even when AI recommends
+exclusion.
 
 ---
 
@@ -293,9 +291,10 @@ retrieval missed.
 4. Before the first review queue exists, select **Synchronize manual papers** to
    run additions through the initial pipeline. After a review queue exists, the
    paper first enters a pending manual-enrichment queue.
-5. Select **Start enrichment and add to review**. The app bypasses discovery and
-   screening, enriches venue type/rank/IF and missing abstracts, then returns the
-   paper to the selected Manual Review round.
+5. Select **Start enrichment and AI screening**. The app bypasses discovery,
+   rule screening, and title prescreening; enriches venue type/rank/IF and missing
+   abstracts; and then runs abstract-level AI screening. Every paper enters the
+   selected Manual Review round, including papers that AI recommends excluding.
 6. Removing an enriched manual paper also removes it from Manual Review and
    updates the saved counts and loop. Automatically discovered matches remain.
 
@@ -518,7 +517,7 @@ corpus together when archiving or publishing a review.
 | A stopped run begins discovery again | Use **Resume run** in Current run. **Start a new initial run** intentionally creates another run from the first stage. |
 | The current run disappears after changing pages | Return to Run Center for the full live panel. The sidebar also shows the selected project's saved status. Ensure the same project is selected. |
 | OpenAI says no key is available | Enter the key on AI settings and select **Apply API key**. Putting it in a research YAML file is intentionally unsupported. |
-| A known paper is missing | Use Add papers at the bottom of Manual Review. After saving it, select **Start enrichment and add to review** so venue and abstract metadata are completed before it enters the selected round. |
+| A known paper is missing | Use Add papers at the bottom of Manual Review. After saving it, select **Start enrichment and AI screening**. Venue and abstract metadata are completed, AI recommendations are recorded, and every result enters the selected review round. |
 | Rank or Impact Factor is blank | The venue could not be matched to the available ranking metadata. Treat it as unknown and verify it manually if required. |
 
 ### 7. Repository Map
@@ -686,8 +685,9 @@ prompt 与成本，再将 `0` 用于全部论文。也可以完全关闭 AI，�
 publication type、DOI、URL 和 addition note。补录记录也会标准化和去重。
 
 首次审阅队列建立前点击 **Synchronize manual papers**，让补录论文经过初始流程。审阅队列建立后，
-新增论文先进入待 enrichment 清单；点击 **启动 enrichment 并加入审阅** 后，它会跳过 discovery 和
-screening，直接补全 venue 类型、rank/IF 和摘要，再返回当前审阅轮次。流程图会显示
+新增论文先进入待 enrichment 清单；点击 **启动 enrichment 和 AI 筛选** 后，它会跳过 discovery、
+规则筛选和标题预筛，补全 venue 类型、rank/IF 与摘要，然后执行摘要级 AI 筛选。无论 AI 建议纳入、
+排除还是待定，论文都会进入当前人工审阅轮次。流程图会显示
 “人工审阅 -> 人工补录 -> enrichment -> 人工审阅”的循环。删除已处理补录论文时，审阅表、计数和
 循环也会同步更新；自动检索到的相同论文不会被删除。添加入口位于**人工审阅**页面最下方。
 
@@ -837,9 +837,10 @@ Query / Abstract limit の `0` は全件を意味し、小さい値はテスト�
 既知タイトルをデータソースで検索して一致を確認するか、title、authors、year、venue、type、DOI、
 URL、追加理由を手入力します。重複は統合されます。最初の review queue を作る前は
 **Synchronize manual papers** を実行します。review queue 作成後は、論文が選択中の audit round へ
-直接は追加されず、enrichment 待ちになります。**Start enrichment and add to review** を押すと、
-venue type、rank/IF、欠落抄録を補完して選択中の audit round に戻り、文献フローには Manual review
-から enrichment を経て戻るループが表示されます。フォームは Manual review の末尾にあります。
+直接は追加されず、enrichment 待ちになります。**Start enrichment and AI screening** を押すと、
+venue type、rank/IF、欠落抄録を補完してから AI 抄録選別を実行します。AI が除外を推奨した場合も
+含め、すべての論文が選択中の audit round に戻ります。文献フローには Manual review から
+enrichment を経て戻るループが表示されます。フォームは Manual review の末尾にあります。
 
 #### 3.6 Manual review
 
@@ -950,9 +951,10 @@ Query / Abstract limit의 `0`은 전체를 의미하고 작은 값은 테스트�
 알고 있는 제목을 선택한 소스에서 찾아 올바른 메타데이터를 확인하거나 title, authors, year, venue,
 publication type, DOI, URL과 추가 이유를 직접 입력합니다. 기록은 중복 제거됩니다. 첫 review queue를
 만들기 전에는 **Synchronize manual papers**를 누릅니다. queue가 만들어진 뒤에는 선택한 audit round에
-바로 추가되지 않고 enrichment 대기 상태가 됩니다. **Start enrichment and add to review**를 누르면
-venue type, rank/IF와 누락 초록을 보강한 뒤 선택한 audit round로 돌아갑니다. 문헌 흐름에는 Manual
-review에서 enrichment를 거쳐 다시 돌아오는 순환이 표시됩니다. 추가 양식은 Manual review 맨 아래에 있습니다.
+바로 추가되지 않고 enrichment 대기 상태가 됩니다. **Start enrichment and AI screening**을 누르면
+venue type, rank/IF와 누락 초록을 보강한 뒤 AI 초록 선별을 실행합니다. AI가 제외를 권고한 경우를
+포함해 모든 논문이 선택한 audit round로 돌아갑니다. 문헌 흐름에는 Manual review에서 enrichment를
+거쳐 다시 돌아오는 순환이 표시됩니다. 추가 양식은 Manual review 맨 아래에 있습니다.
 
 #### 3.6 Manual review
 

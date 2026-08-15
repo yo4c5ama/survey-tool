@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from vnn_survey import llm_screening
 from vnn_survey.app.audit import read_csv
 from vnn_survey.app.audit import write_csv as write_audit_csv
 from vnn_survey.app.manual_papers import ManualPaperStore, create_manual_record
@@ -7,6 +8,28 @@ from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
 from vnn_survey.export import write_csv as write_paper_csv
 from vnn_survey.models import PaperRecord
+
+
+def _install_fake_manual_screening(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def screen(self, row: dict[str, str]) -> dict[str, object]:
+            excluded = row["title"] in {
+                "Manually Added to Review",
+                "Saved Before Live Review",
+            }
+            return {
+                "decision": "exclude" if excluded else "include",
+                "scope": "out_of_scope" if excluded else "in_scope",
+                "confidence": 0.95,
+                "reason": "Test exclusion" if excluded else "Test inclusion",
+                "evidence": row["title"],
+                "_response_id": "manual-screening-test",
+            }
+
+    monkeypatch.setattr(llm_screening, "OpenAIResponsesClient", FakeClient)
 
 
 def test_manual_papers_can_be_added_and_removed_before_review(tmp_path: Path) -> None:
@@ -88,7 +111,10 @@ def test_manual_papers_can_be_added_and_removed_before_review(tmp_path: Path) ->
     assert [row["title"] for row in rows] == ["Automatically Found"]
 
 
-def test_manual_paper_is_enriched_before_entering_existing_review(tmp_path: Path) -> None:
+def test_manual_paper_is_enriched_before_entering_existing_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
     project = store.create_project(
         name="Live Manual Review",
@@ -98,6 +124,8 @@ def test_manual_paper_is_enriched_before_entering_existing_review(tmp_path: Path
         year_end=2026,
         keyword_groups=[KeywordGroup("topic", ["verification"])],
     )
+    store.save_api_key(project.slug, "test-key")
+    _install_fake_manual_screening(monkeypatch)
     service = PipelineService(store)
     run_id = "live-manual-run"
     audit_path = store.project_dir(project.slug) / "audits" / run_id / "round_0.csv"
@@ -204,6 +232,11 @@ def test_manual_paper_is_enriched_before_entering_existing_review(tmp_path: Path
     assert rows[1]["manual_review_added"] == "true"
     assert rows[1]["manual_enrichment_status"] == "completed"
     assert rows[1]["manual_notes"] == "Known relevant paper"
+    assert rows[1]["llm_decision"] == "exclude"
+    assert rows[1]["llm_confidence"] == "0.950"
+    assert rows[1]["llm_reason"] == "Test exclusion"
+    assert rows[1]["final_recommendation"] == "likely_exclude"
+    assert rows[1]["manual_review_required"] == "true"
 
     updated = service.load_current_state(project.slug)
     updated_round = updated["rounds"][0]
@@ -219,10 +252,15 @@ def test_manual_paper_is_enriched_before_entering_existing_review(tmp_path: Path
         "manual_loop_additions",
         "manual_venue_enrichment",
         "manual_abstract_enrichment",
+        "manual_ai_abstract_screening",
         "manual_return_to_review",
     ]
     assert updated_round["flow"][-1]["loop_to"] == "human_audit"
     assert updated_round["flow"][2]["retained"] == 1
+    assert updated_round["flow"][-2]["retained"] == 1
+    assert updated_round["flow"][-2]["excluded"] == 0
+    assert updated_round["flow"][-2]["details"]["AI exclude recommendations"] == 1
+    assert updated_round["counts"]["manual_llm_excluded"] == 1
 
     second = create_manual_record(
         title="A Second Manual Paper",
@@ -287,6 +325,7 @@ def test_manual_paper_is_enriched_before_entering_existing_review(tmp_path: Path
 
 def test_legacy_direct_manual_paper_enters_enrichment_loop_without_duplication(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
     project = store.create_project(
@@ -297,6 +336,8 @@ def test_legacy_direct_manual_paper_enters_enrichment_loop_without_duplication(
         year_end=2026,
         keyword_groups=[KeywordGroup("topic", ["verification"])],
     )
+    store.save_api_key(project.slug, "test-key")
+    _install_fake_manual_screening(monkeypatch)
     legacy = create_manual_record(
         title="Saved Before Live Review",
         year=2024,
@@ -370,3 +411,4 @@ def test_legacy_direct_manual_paper_enters_enrichment_loop_without_duplication(
         "Saved Before Live Review",
     ]
     assert read_csv(audit_path)[1][1]["manual_enrichment_status"] == "completed"
+    assert read_csv(audit_path)[1][1]["llm_decision"] == "exclude"

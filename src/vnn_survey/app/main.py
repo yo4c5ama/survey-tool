@@ -1286,8 +1286,9 @@ def _render_manual_additions(
         st.subheader(_t("Manual enrichment loop"))
         st.write(
             _t(
-                "Start the pending researcher additions at venue and abstract enrichment. "
-                "Completed papers return to the selected manual review round."
+                "Start venue enrichment, abstract enrichment, and AI abstract screening for "
+                "pending researcher additions. Every AI result returns to the selected manual "
+                "review round."
             )
         )
         status_columns = st.columns(2)
@@ -1299,12 +1300,21 @@ def _render_manual_additions(
             _t("Enriched manual papers"),
             enrichment_status["enriched"],
         )
+        has_ai_key = store.has_api_key(project.slug) or bool(
+            os.environ.get("OPENAI_API_KEY")
+        )
+        if not has_ai_key:
+            st.warning(_t("Add an API key on the AI settings page before continuing."))
         if st.button(
-            _t("Start enrichment and add to review"),
+            _t("Start enrichment and AI screening"),
             type="primary",
             icon=":material/play_arrow:",
             width="stretch",
-            disabled=not enrichment_status["pending"] or bool(task and task.running),
+            disabled=(
+                not enrichment_status["pending"]
+                or bool(task and task.running)
+                or not has_ai_key
+            ),
             key=f"manual_enrichment_start_{project.slug}_{active_round_index}",
         ):
             started = _task_manager().start(

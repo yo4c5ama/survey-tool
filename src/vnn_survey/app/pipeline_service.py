@@ -74,6 +74,7 @@ MANUAL_ENRICHMENT_STAGES = [
     "Manual additions",
     "Venue enrichment",
     "Abstract enrichment",
+    "AI abstract screening",
     "Return to manual review",
 ]
 CORPUS_ANALYSIS_STAGES = [
@@ -1669,6 +1670,12 @@ class PipelineService:
         )
         if not targets:
             raise RuntimeError("No manually added papers are waiting for enrichment.")
+        if not self.store.has_api_key(project_slug) and not os.environ.get(
+            "OPENAI_API_KEY"
+        ):
+            raise RuntimeError(
+                "Save or provide an OpenAI API key before screening manual additions."
+            )
 
         audit_path = Path(target_round["files"]["audit"])
         _, current_audit_rows, current_summary = load_audit(audit_path)
@@ -1685,6 +1692,10 @@ class PipelineService:
         input_path = batch_dir / "manual_input.csv"
         venue_path = batch_dir / "manual_venues.csv"
         enriched_path = batch_dir / "manual_enriched.csv"
+        llm_path = batch_dir / "manual_llm_screened.csv"
+        recommendation_path = batch_dir / "manual_recommendations.csv"
+        llm_report_path = batch_dir / "manual_llm_screening_report.md"
+        final_summary_path = batch_dir / "manual_llm_screening_summary.json"
         input_rows = [_manual_enrichment_input(record) for record in targets]
         input_fields = list(dict.fromkeys(key for row in input_rows for key in row))
         write_audit_csv(input_path, input_rows, input_fields)
@@ -1736,48 +1747,70 @@ class PipelineService:
                 enrichment_result.summary,
                 batch_dir / "abstract_enrichment_summary.json",
             )
+            _notify(
+                tracked_progress,
+                "AI abstract screening",
+                "Analyzing every manually added paper before human review.",
+            )
+            llm_result = llm_screen_candidates(
+                enriched_path,
+                llm_path,
+                config.llm_screening,
+                overwrite=True,
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "AI abstract screening",
+                    "Analyzing manually added papers with the configured model.",
+                ),
+            )
+            write_llm_screening_summary(
+                llm_result.summary,
+                batch_dir / "manual_llm_request_summary.json",
+            )
+            recommendation_result = summarize_llm_screening(
+                llm_path,
+                llm_report_path,
+                recommendation_path,
+                final_summary_path,
+            )
 
             _notify(
                 tracked_progress,
                 "Return to manual review",
-                "Writing enriched papers back to the selected review round.",
+                "Returning every manually added paper to the selected review round.",
             )
             fieldnames, audit_rows = read_csv(audit_path)
             appended = 0
-            for enriched_row in enrichment_result.rows:
+            for screened_row in recommendation_result.rows:
                 match_index = next(
                     (
                         index
                         for index, audit_row in enumerate(audit_rows)
-                        if _audit_rows_match(audit_row, enriched_row)
+                        if _audit_rows_match(audit_row, screened_row)
                     ),
                     None,
                 )
                 if match_index is None:
                     prepared = _manual_audit_row(
-                        PaperRecord.from_dict(enriched_row),
-                        enriched_row.get("manual_note", ""),
+                        PaperRecord.from_dict(screened_row),
+                        screened_row.get("manual_note", ""),
                     )
-                    prepared.update(enriched_row)
+                    prepared.update(screened_row)
                     audit_rows.append(prepared)
                     match_index = len(audit_rows) - 1
                     appended += 1
                 else:
                     decision = audit_rows[match_index].get("manual_decision", "")
                     notes = audit_rows[match_index].get("manual_notes", "")
-                    audit_rows[match_index].update(enriched_row)
+                    audit_rows[match_index].update(screened_row)
                     audit_rows[match_index]["manual_decision"] = decision
                     audit_rows[match_index]["manual_notes"] = notes
                 audit_rows[match_index].update(
                     {
                         "auto_screening_decision": "needs_review",
                         "auto_screening_reason": "Added directly by the researcher.",
-                        "final_recommendation": "manual_review",
-                        "final_priority": "1",
-                        "final_reason": (
-                            "Enriched researcher addition returned for human review."
-                        ),
                         "manual_review_added": "true",
+                        "manual_review_required": "true",
                         "manual_enrichment_status": "completed",
                         "manual_enriched_at": _now(),
                     }
@@ -1806,6 +1839,18 @@ class PipelineService:
                         bool((row.get("abstract") or "").strip())
                         for row in enriched_manual_rows
                     ),
+                    "manual_llm_screened": sum(
+                        bool((row.get("llm_decision") or "").strip())
+                        for row in enriched_manual_rows
+                    ),
+                    "manual_llm_excluded": sum(
+                        row.get("llm_decision") == "exclude"
+                        for row in enriched_manual_rows
+                    ),
+                    "manual_llm_failed": sum(
+                        row.get("llm_status") == "failed"
+                        for row in enriched_manual_rows
+                    ),
                     "abstract_api_requests": int(
                         target_round["counts"].get("abstract_api_requests") or 0
                     )
@@ -1830,6 +1875,11 @@ class PipelineService:
                 }
             )
             target_round["files"]["manual_enrichment_latest"] = str(enriched_path)
+            target_round["files"]["manual_llm_screened_latest"] = str(llm_path)
+            target_round["files"]["manual_llm_report_latest"] = str(llm_report_path)
+            target_round["files"]["manual_recommendations_latest"] = str(
+                recommendation_path
+            )
             _record_manual_enrichment_flow(target_round, audit_rows)
             target_round["status"] = "ready_for_review"
             target_round["error"] = ""
@@ -1907,6 +1957,21 @@ class PipelineService:
             round_state["counts"]["manual_enriched"] = len(enriched_manual_rows)
             round_state["counts"]["manual_review_additions"] = len(
                 enriched_manual_rows
+            )
+            round_state["counts"]["manual_abstracts_found"] = sum(
+                bool((row.get("abstract") or "").strip())
+                for row in enriched_manual_rows
+            )
+            round_state["counts"]["manual_llm_screened"] = sum(
+                bool((row.get("llm_decision") or "").strip())
+                for row in enriched_manual_rows
+            )
+            round_state["counts"]["manual_llm_excluded"] = sum(
+                row.get("llm_decision") == "exclude"
+                for row in enriched_manual_rows
+            )
+            round_state["counts"]["manual_llm_failed"] = sum(
+                row.get("llm_status") == "failed" for row in enriched_manual_rows
             )
             _apply_audit_summary(round_state, summary)
             _record_manual_enrichment_flow(round_state, retained)
@@ -2430,6 +2495,7 @@ def _record_manual_enrichment_flow(
         "manual_loop_additions",
         "manual_venue_enrichment",
         "manual_abstract_enrichment",
+        "manual_ai_abstract_screening",
         "manual_return_to_review",
     }
     base_stages = [
@@ -2449,6 +2515,9 @@ def _record_manual_enrichment_flow(
     count = len(manual_rows)
     abstracts_found = sum(bool((row.get("abstract") or "").strip()) for row in manual_rows)
     ranked = sum(bool(row.get("core_rank") or row.get("impact_factor")) for row in manual_rows)
+    ai_screened = sum(bool((row.get("llm_decision") or "").strip()) for row in manual_rows)
+    ai_excluded = sum(row.get("llm_decision") == "exclude" for row in manual_rows)
+    ai_failed = sum(row.get("llm_status") == "failed" for row in manual_rows)
     loop_holder: dict[str, Any] = {"flow": []}
     record_flow_stage(
         loop_holder,
@@ -2477,6 +2546,20 @@ def _record_manual_enrichment_flow(
         retained_count=count,
         stage_type="enrichment",
         details={"abstracts found": abstracts_found},
+    )
+    record_flow_stage(
+        loop_holder,
+        key="manual_ai_abstract_screening",
+        label="Manual AI abstract screening",
+        input_count=count,
+        retained_count=count,
+        excluded_count=0,
+        stage_type="enrichment",
+        details={
+            "AI screened": ai_screened,
+            "AI exclude recommendations": ai_excluded,
+            "failed": ai_failed,
+        },
     )
     record_flow_stage(
         loop_holder,
