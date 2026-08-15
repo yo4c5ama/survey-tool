@@ -8,6 +8,8 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
+from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlencode
@@ -15,7 +17,9 @@ from urllib.parse import urlencode
 import requests
 
 from vnn_survey.app.task_manager import cancellable_sleep, raise_if_cancelled
-from vnn_survey.config import VenueQualityConfig
+from vnn_survey.config import SurveyConfig, VenueQualityConfig
+from vnn_survey.models import PaperRecord, normalize_title
+from vnn_survey.sources import search_title_candidates
 
 ItemProgressCallback = Callable[[int, int, str], None]
 
@@ -50,6 +54,8 @@ class VenueQualitySummary:
     journals: int
     journals_with_impact_factor: int
     arxiv: int
+    publication_resolution_attempted: int = 0
+    published_versions_resolved: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +96,8 @@ def enrich_venue_quality(
     config: VenueQualityConfig,
     decisions: set[str] | None = None,
     progress_callback: ItemProgressCallback | None = None,
+    survey_config: SurveyConfig | None = None,
+    publication_resolution_path: Path | None = None,
 ) -> VenueQualityResult:
     with input_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -98,6 +106,7 @@ def enrich_venue_quality(
 
     lookup = VenueLookup(config)
     enriched_rows: list[dict[str, str]] = []
+    resolution_diagnostics: list[dict[str, object]] = []
     eligible_total = sum(
         decisions is None
         or "auto_screening_decision" not in row
@@ -118,12 +127,37 @@ def enrich_venue_quality(
                 annotated.setdefault(field, "")
             enriched_rows.append(annotated)
         else:
-            enriched_rows.append(_annotate_row(row, lookup=lookup))
+            prepared = row
+            if survey_config is not None and _infer_venue_type(row) == "arxiv":
+                prepared, diagnostic = _resolve_published_version(row, survey_config)
+                resolution_diagnostics.append(diagnostic)
+            enriched_rows.append(_annotate_row(prepared, lookup=lookup))
             completed += 1
             if progress_callback:
                 progress_callback(completed, eligible_total, row.get("title", ""))
     write_venue_quality_csv(enriched_rows, input_fields, output_path)
-    return VenueQualityResult(rows=enriched_rows, summary=summarize_venue_quality(enriched_rows))
+    if publication_resolution_path is not None:
+        _write_publication_resolution_report(
+            publication_resolution_path,
+            resolution_diagnostics,
+        )
+    summary = summarize_venue_quality(enriched_rows)
+    summary = VenueQualitySummary(
+        total=summary.total,
+        by_venue_type=summary.by_venue_type,
+        by_core_rank=summary.by_core_rank,
+        by_journal_impact_factor_band=summary.by_journal_impact_factor_band,
+        conferences=summary.conferences,
+        conferences_with_core_rank=summary.conferences_with_core_rank,
+        journals=summary.journals,
+        journals_with_impact_factor=summary.journals_with_impact_factor,
+        arxiv=summary.arxiv,
+        publication_resolution_attempted=len(resolution_diagnostics),
+        published_versions_resolved=sum(
+            item.get("status") == "resolved" for item in resolution_diagnostics
+        ),
+    )
+    return VenueQualityResult(rows=enriched_rows, summary=summary)
 
 
 def write_venue_quality_csv(
@@ -159,6 +193,8 @@ def write_venue_quality_summary(summary: VenueQualitySummary, output_path: Path)
         "journals": summary.journals,
         "journals_with_impact_factor": summary.journals_with_impact_factor,
         "arxiv": summary.arxiv,
+        "publication_resolution_attempted": summary.publication_resolution_attempted,
+        "published_versions_resolved": summary.published_versions_resolved,
     }
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -207,23 +243,302 @@ def _annotate_row(row: dict[str, str], lookup: VenueLookup) -> dict[str, str]:
     return annotated
 
 
+def _resolve_published_version(
+    row: dict[str, str],
+    config: SurveyConfig,
+) -> tuple[dict[str, str], dict[str, object]]:
+    title = (row.get("title") or "").strip()
+    original = {
+        "title": title,
+        "year": row.get("year", ""),
+        "venue": row.get("venue", ""),
+        "doi": row.get("doi", ""),
+        "publication_type": row.get("publication_type", ""),
+        "url": row.get("url", ""),
+    }
+    try:
+        candidates, errors = search_title_candidates(
+            title,
+            ["dblp", "crossref", "openalex"],
+            config,
+            limit_per_source=5,
+        )
+    except Exception as exc:  # noqa: BLE001 - venue enrichment must continue.
+        return dict(row), {
+            "status": "error",
+            "original": original,
+            "errors": {"resolver": str(exc)},
+        }
+
+    matches = [
+        candidate
+        for candidate in candidates
+        if _is_formal_publication(candidate)
+        and _publication_match_is_safe(row, candidate)
+    ]
+    if not matches:
+        return dict(row), {
+            "status": "unresolved",
+            "original": original,
+            "candidate_count": len(candidates),
+            "candidate_evidence": [
+                _publication_candidate_evidence(row, candidate)
+                for candidate in candidates[:5]
+            ],
+            "errors": errors,
+        }
+
+    match = max(matches, key=lambda candidate: _publication_match_rank(row, candidate))
+    prepared = dict(row)
+    if match.venue:
+        prepared["venue"] = match.venue
+    if match.doi and not _is_arxiv_doi(match.doi):
+        prepared["doi"] = match.doi
+    if match.publication_type:
+        prepared["publication_type"] = match.publication_type
+    if match.year:
+        prepared["year"] = str(match.year)
+    if match.url:
+        prepared["url"] = match.url
+    if match.dblp_key:
+        prepared["dblp_key"] = match.dblp_key
+    prepared["discovery_sources"] = _merge_sources(
+        row.get("discovery_sources", ""),
+        match.source,
+    )
+    return prepared, {
+        "status": "resolved",
+        "original": original,
+        "match": {
+            "title": match.title,
+            "year": match.year,
+            "venue": match.venue,
+            "doi": match.doi,
+            "publication_type": match.publication_type,
+            "url": match.url,
+            "source": match.source,
+            "dblp_key": match.dblp_key,
+            "title_similarity": round(_publication_title_similarity(row, match), 4),
+            "author_overlap": _has_author_overlap(row, match),
+        },
+        "candidate_count": len(candidates),
+        "errors": errors,
+    }
+
+
+def _publication_match_is_safe(row: dict[str, str], candidate: PaperRecord) -> bool:
+    similarity = _publication_title_similarity(row, candidate)
+    if similarity < 0.9 or not _publication_year_is_plausible(row, candidate):
+        return False
+    source_doi = _normalize_doi(row.get("doi", ""))
+    candidate_doi = _normalize_doi(candidate.doi or "")
+    doi_match = bool(
+        source_doi
+        and candidate_doi
+        and not _is_arxiv_doi(source_doi)
+        and source_doi == candidate_doi
+    )
+    exact_title = normalize_title(row.get("title", "")) == normalize_title(
+        candidate.title
+    )
+    row_authors = _author_surnames(row.get("authors", ""))
+    candidate_authors = _author_surnames(candidate.authors)
+    author_overlap = bool(row_authors & candidate_authors)
+    return doi_match or (exact_title and author_overlap) or (
+        similarity >= 0.95 and author_overlap
+    )
+
+
+def _publication_match_rank(
+    row: dict[str, str],
+    candidate: PaperRecord,
+) -> tuple[int, int, int, float, int]:
+    source_doi = _normalize_doi(row.get("doi", ""))
+    candidate_doi = _normalize_doi(candidate.doi or "")
+    doi_match = bool(
+        source_doi
+        and candidate_doi
+        and not _is_arxiv_doi(source_doi)
+        and source_doi == candidate_doi
+    )
+    exact_title = normalize_title(row.get("title", "")) == normalize_title(
+        candidate.title
+    )
+    source_priority = {"dblp": 3, "crossref": 2, "openalex": 1}.get(
+        candidate.source,
+        0,
+    )
+    return (
+        int(doi_match),
+        int(exact_title),
+        int(_has_author_overlap(row, candidate)),
+        _publication_title_similarity(row, candidate),
+        source_priority,
+    )
+
+
+def _is_formal_publication(record: PaperRecord) -> bool:
+    venue = (record.venue or "").strip().lower()
+    publication_type = (record.publication_type or "").strip().lower()
+    key = (record.dblp_key or "").strip().lower()
+    if (
+        record.source == "arxiv"
+        or _is_arxiv_doi(record.doi or "")
+        or venue in {"arxiv", "corr"}
+        or "arxiv" in venue
+        or "computing research repository" in venue
+        or key.startswith("journals/corr")
+        or publication_type in {"preprint", "posted-content"}
+    ):
+        return False
+    return bool(
+        venue
+        and (
+            key.startswith(("conf/", "journals/"))
+            or publication_type
+            in {
+                "article",
+                "journal-article",
+                "journal articles",
+                "inproceedings",
+                "proceedings-article",
+                "conference and workshop papers",
+            }
+            or (record.doi and not _is_arxiv_doi(record.doi))
+        )
+    )
+
+
+def _publication_title_similarity(row: dict[str, str], candidate: PaperRecord) -> float:
+    return SequenceMatcher(
+        None,
+        normalize_title(row.get("title", "")),
+        normalize_title(candidate.title),
+    ).ratio()
+
+
+def _publication_candidate_evidence(
+    row: dict[str, str],
+    candidate: PaperRecord,
+) -> dict[str, object]:
+    return {
+        "title": candidate.title,
+        "year": candidate.year,
+        "venue": candidate.venue,
+        "doi": candidate.doi,
+        "publication_type": candidate.publication_type,
+        "source": candidate.source,
+        "dblp_key": candidate.dblp_key,
+        "formal_publication": _is_formal_publication(candidate),
+        "title_similarity": round(_publication_title_similarity(row, candidate), 4),
+        "author_overlap": _has_author_overlap(row, candidate),
+        "year_plausible": _publication_year_is_plausible(row, candidate),
+    }
+
+
+def _publication_year_is_plausible(
+    row: dict[str, str],
+    candidate: PaperRecord,
+) -> bool:
+    try:
+        source_year = int(row.get("year") or 0)
+    except ValueError:
+        source_year = 0
+    if not source_year or not candidate.year:
+        return True
+    return source_year - 2 <= candidate.year <= source_year + 5
+
+
+def _has_author_overlap(row: dict[str, str], candidate: PaperRecord) -> bool:
+    return bool(
+        _author_surnames(row.get("authors", ""))
+        & _author_surnames(candidate.authors)
+    )
+
+
+def _author_surnames(value: str | list[str]) -> set[str]:
+    authors = value.split(";") if isinstance(value, str) else value
+    surnames: set[str] = set()
+    for author in authors:
+        parts = normalize_title(str(author)).split()
+        if parts:
+            surnames.add(parts[-1])
+    return surnames
+
+
+def _merge_sources(existing: str, source: str) -> str:
+    values = [item.strip() for item in existing.split(";") if item.strip()]
+    if source and source not in values:
+        values.append(source)
+    return "; ".join(values)
+
+
+def _write_publication_resolution_report(
+    path: Path,
+    diagnostics: list[dict[str, object]],
+) -> None:
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "attempted": len(diagnostics),
+        "resolved": sum(item.get("status") == "resolved" for item in diagnostics),
+        "unresolved": sum(item.get("status") == "unresolved" for item in diagnostics),
+        "errors": sum(item.get("status") == "error" for item in diagnostics),
+        "records": diagnostics,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _infer_venue_type(row: dict[str, str]) -> str:
     key = (row.get("dblp_key") or "").lower()
     venue = (row.get("venue") or "").lower()
     publication_type = (row.get("publication_type") or "").lower()
 
-    if key.startswith("journals/corr") or venue in {"corr", "arxiv"} or "arxiv" in venue:
+    if key.startswith("conf/"):
+        return "conference"
+    if key.startswith("journals/") and not key.startswith("journals/corr"):
+        return "journal"
+    if (
+        key.startswith("journals/corr")
+        or venue in {"corr", "arxiv"}
+        or "arxiv" in venue
+        or "computing research repository" in venue
+        or publication_type in {"preprint", "posted-content"}
+    ):
         return "arxiv"
-    if key.startswith("conf/") or publication_type in {
+    if publication_type in {
         "inproceedings",
+        "proceedings-article",
         "conference and workshop papers",
     }:
         return "conference"
-    if key.startswith("journals/") or publication_type in {"article", "journal articles"}:
+    if publication_type in {
+        "article",
+        "journal-article",
+        "journal articles",
+    }:
         return "journal"
     if key.startswith("books/") or "book" in publication_type:
         return "book"
     return "unknown"
+
+
+def _normalize_doi(value: str) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .removeprefix("https://doi.org/")
+        .removeprefix("http://dx.doi.org/")
+        .removeprefix("doi:")
+    )
+
+
+def _is_arxiv_doi(value: str) -> bool:
+    return _normalize_doi(value).startswith("10.48550/arxiv.")
 
 
 def _venue_key(row: dict[str, str]) -> str:

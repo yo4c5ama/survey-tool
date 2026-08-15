@@ -16,7 +16,7 @@ flowchart TD
     C --> E["Apply rule-based title exclusions"]
     E --> T{"Use batched AI title prescreen?"}
     T -- Yes --> U["Keep relevant or ambiguous titles<br/>Cache every title decision"]
-    T -- No --> D["Enrich venue rank and IF<br/>Preserve native abstracts, then use fallbacks"]
+    T -- No --> D["Resolve published versions and venue rank/IF<br/>Preserve native abstracts, then use fallbacks"]
     U --> D
     D --> F{"Use abstract-level AI screening?"}
     F -- Yes --> G["Generate AI recommendations<br/>from titles and abstracts"]
@@ -148,7 +148,7 @@ constructed.
 | **Inclusion criteria** | One independently checkable condition per line. These guide AI recommendations and human audit decisions. |
 | **Exclusion criteria** | One clear reason for exclusion per line. Describe conceptual exclusions, not only unwanted words. |
 | **Title exclusion terms** | Optional high-precision phrases removed before expensive enrichment. Use conservatively because a matching title is excluded automatically. |
-| **Keep arXiv / CoRR** | Retains preprint records. Deduplication may later merge preprint and published metadata, but human review should still check versions. |
+| **Keep arXiv / CoRR** | Retains preprint records. Venue enrichment later attempts to resolve formal versions conservatively, but human review should still check versions. |
 | **Keep informal records** | Retains records that are not clearly conference, journal, or preprint publications. Useful for broad reviews, but often disabled for strict publication-only corpora. |
 
 The Boolean logic is:
@@ -267,6 +267,13 @@ operation, status, current paper count, overall progress, item progress, and the
 latest saved time. The literature-flow diagram and JSON download preserve the
 paper count at each completed stage, including API requests, cache hits, and
 observed rate-limit waiting for abstract enrichment.
+
+Before assigning venue type, rank, or IF, venue enrichment checks records that
+still look like arXiv preprints against DBLP, Crossref, and OpenAlex. A formal
+record replaces the preprint metadata only when DOI or title, author, and year
+evidence is sufficiently strong. Uncertain cases remain arXiv. The main CSV
+stays compact; match evidence and provider errors are saved in
+`publication_resolution.json` (or the corresponding round/manual batch file).
 
 **Stop, resume, and run again**
 
@@ -694,6 +701,11 @@ Crossref polite pool。输入后必须点击相应的 **Apply**。密钥只保�
 - **AI title prescreen** 在摘要补全前批量读取标题，以高召回方式排除明确无关项；模糊项保留。
 - **AI abstract screening** 在摘要补全后读取标题和摘要，生成更精细的纳入建议。
 
+Venue enrichment 会先将仍像 arXiv 预印本的记录与 DBLP、Crossref、OpenAlex 中的正式版本
+进行保守匹配。只有 DOI，或题目、作者、年份证据足够一致时，才替换 venue、DOI 和 publication
+type；无法确认的仍保留为 arXiv。匹配证据和数据源错误保存在 `publication_resolution.json`
+（滚雪球轮次和人工补录批次使用对应文件），主表不会因此增加大量字段。
+
 页面显示 Run ID、当前操作、状态、已收集论文数、总进度、当前批次和最后保存时间。
 Literature flow 会记录每一步的输入、排除和保留数量，并可下载 SVG 流程图和 JSON 统计。
 摘要诊断还显示 API 请求、批请求、缓存命中、429 重试和等待时间。
@@ -869,6 +881,11 @@ Query / Abstract limit の `0` は全件を意味し、小さい値はテスト�
 詳細な推奨を作ります。Run ID、工程、件数、進捗、保存時刻、各工程の入力・除外・保持数を確認でき、
 フロー SVG と counts JSON をダウンロードできます。
 
+Venue enrichment は arXiv プレプリントとして残っている記録を DBLP、Crossref、OpenAlex の正式版と
+照合します。DOI、または title・authors・year の証拠が十分に一致する場合だけ venue、DOI、type を
+更新し、不確実な記録は arXiv のまま保持します。照合根拠と provider error は
+`publication_resolution.json`（round/manual batch ごとの対応ファイル）に保存されます。
+
 **Stop run** は現在の安全なリクエスト境界で停止するため、即時ではない場合があります。
 **Resume run** は最新 checkpoint から再開します。**Start a new initial run** は旧ファイルを
 残したまま別の run を最初から作成する操作です。
@@ -996,6 +1013,11 @@ Query / Abstract limit의 `0`은 전체를 의미하고 작은 값은 테스트�
 보강 전에 명확히 무관한 제목을 고재현율로 제거하고, AI abstract screening은 제목과 초록으로 더 자세한
 추천을 만듭니다. Run ID, 작업, 수집 논문 수, 진행률, 마지막 저장 시각과 각 단계의 입력/제외/유지 수를
 볼 수 있으며 flow SVG와 counts JSON을 받을 수 있습니다.
+
+Venue enrichment는 arXiv 프리프린트로 남은 기록을 DBLP, Crossref, OpenAlex의 정식 출판본과
+보수적으로 대조합니다. DOI 또는 title, authors, year 근거가 충분히 일치할 때만 venue, DOI, type을
+갱신하며 불확실한 기록은 arXiv로 유지합니다. 대조 근거와 provider 오류는
+`publication_resolution.json` 또는 해당 round/manual batch 파일에 저장됩니다.
 
 **Stop run**은 현재 네트워크 요청이나 AI batch가 안전하게 끝난 뒤 중지하므로 즉시 멈추지 않을 수
 있습니다. **Resume run**은 최근 checkpoint에서 계속합니다. **Start a new initial run**은 기존 파일을

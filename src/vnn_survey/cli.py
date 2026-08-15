@@ -371,6 +371,10 @@ def enrich_venues_cmd(
         input_path=input_path,
         output_path=resolved_output,
         config=venue_config,
+        survey_config=survey_config,
+        publication_resolution_path=resolved_output.with_name(
+            f"{resolved_output.stem}_publication_resolution.json"
+        ),
     )
     summary_path = resolved_output.with_name("venue_quality_summary.json")
     write_venue_quality_summary(result.summary, summary_path)
@@ -752,6 +756,16 @@ def _print_venue_quality_summary(summary, output_path: Path, summary_path: Path)
     table.add_row("total", "journals", str(summary.journals))
     table.add_row("total", "journals_with_impact_factor", str(summary.journals_with_impact_factor))
     table.add_row("total", "arxiv", str(summary.arxiv))
+    table.add_row(
+        "publication_resolution",
+        "attempted",
+        str(summary.publication_resolution_attempted),
+    )
+    table.add_row(
+        "publication_resolution",
+        "resolved",
+        str(summary.published_versions_resolved),
+    )
     for value, count in summary.by_venue_type.most_common():
         table.add_row("venue_type", value or "empty", str(count))
     for value, count in summary.by_core_rank.most_common():

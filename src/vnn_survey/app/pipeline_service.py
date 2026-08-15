@@ -283,19 +283,22 @@ class PipelineService:
             _notify(
                 tracked_progress,
                 "Venue enrichment",
-                "Adding publication type, CORE rank, and IF.",
+                "Resolving published versions and adding venue quality metadata.",
             )
             venue_path = processed_dir / "candidate_papers_venues.csv"
+            publication_resolution_path = processed_dir / "publication_resolution.json"
             venue_config = replace(config.venue_quality, core_online_enabled=core_online)
             venue_result = enrich_venue_quality(
                 title_input,
                 venue_path,
                 venue_config,
                 decisions={"include_candidate", "needs_review"},
+                survey_config=config,
+                publication_resolution_path=publication_resolution_path,
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Venue enrichment",
-                    "Adding publication type, CORE rank, and IF.",
+                    "Resolving published versions and adding venue quality metadata.",
                 ),
             )
             write_venue_quality_summary(
@@ -308,6 +311,9 @@ class PipelineService:
                 else rule_retained
             )
             round_state["files"]["venues"] = str(venue_path)
+            round_state["files"]["publication_resolution"] = str(
+                publication_resolution_path
+            )
             record_flow_stage(
                 round_state,
                 key="venue_enrichment",
@@ -324,6 +330,16 @@ class PipelineService:
                     "impact factors found": getattr(
                         venue_result.summary,
                         "journals_with_impact_factor",
+                        0,
+                    ),
+                    "preprints checked": getattr(
+                        venue_result.summary,
+                        "publication_resolution_attempted",
+                        0,
+                    ),
+                    "published versions resolved": getattr(
+                        venue_result.summary,
+                        "published_versions_resolved",
                         0,
                     ),
                 },
@@ -384,6 +400,16 @@ class PipelineService:
                 "manual_records": len(manual_records),
                 "rule_excluded": screening_result.summary.by_decision.get("exclude", 0),
                 **_title_screening_counts(title_result),
+                "publication_resolution_attempted": getattr(
+                    venue_result.summary,
+                    "publication_resolution_attempted",
+                    0,
+                ),
+                "published_versions_resolved": getattr(
+                    venue_result.summary,
+                    "published_versions_resolved",
+                    0,
+                ),
                 "abstracts_found": enrichment_result.summary.with_abstract,
                 "abstracts_attempted": enrichment_result.summary.attempted,
                 "abstract_api_requests": getattr(
@@ -618,17 +644,20 @@ class PipelineService:
                 "Reusing saved venue metadata when available.",
             )
             venue_summary = _read_json(processed_dir / "venue_quality_summary.json")
-            if not venue_path.exists():
+            publication_resolution_path = processed_dir / "publication_resolution.json"
+            if not venue_path.exists() or not publication_resolution_path.exists():
                 venue_config = replace(config.venue_quality, core_online_enabled=core_online)
                 venue_result = enrich_venue_quality(
                     title_input,
                     venue_path,
                     venue_config,
                     decisions={"include_candidate", "needs_review"},
+                    survey_config=config,
+                    publication_resolution_path=publication_resolution_path,
                     progress_callback=_item_progress(
                         tracked_progress,
                         "Venue enrichment",
-                        "Adding publication type, CORE rank, and IF.",
+                        "Resolving published versions and adding venue quality metadata.",
                     ),
                 )
                 write_venue_quality_summary(
@@ -646,8 +675,21 @@ class PipelineService:
                         "journals_with_impact_factor",
                         0,
                     ),
+                    "publication_resolution_attempted": getattr(
+                        venue_result.summary,
+                        "publication_resolution_attempted",
+                        0,
+                    ),
+                    "published_versions_resolved": getattr(
+                        venue_result.summary,
+                        "published_versions_resolved",
+                        0,
+                    ),
                 }
             round_state["files"]["venues"] = str(venue_path)
+            round_state["files"]["publication_resolution"] = str(
+                publication_resolution_path
+            )
             record_flow_stage(
                 round_state,
                 key="venue_enrichment",
@@ -661,6 +703,12 @@ class PipelineService:
                     ),
                     "impact factors found": int(
                         venue_summary.get("journals_with_impact_factor", 0)
+                    ),
+                    "preprints checked": int(
+                        venue_summary.get("publication_resolution_attempted", 0)
+                    ),
+                    "published versions resolved": int(
+                        venue_summary.get("published_versions_resolved", 0)
                     ),
                 },
             )
@@ -691,6 +739,12 @@ class PipelineService:
             round_state["counts"].update(
                 {
                     "manual_records": len(manual_records),
+                    "publication_resolution_attempted": int(
+                        venue_summary.get("publication_resolution_attempted", 0)
+                    ),
+                    "published_versions_resolved": int(
+                        venue_summary.get("published_versions_resolved", 0)
+                    ),
                     "abstracts_found": enrichment_result.summary.with_abstract,
                     "abstracts_attempted": enrichment_result.summary.attempted,
                     "abstract_api_requests": enrichment_result.summary.api_requests,
@@ -895,19 +949,22 @@ class PipelineService:
             _notify(
                 tracked_progress,
                 "Venue enrichment",
-                "Adding publication type, CORE rank, and IF.",
+                "Resolving published versions and adding venue quality metadata.",
             )
             venue_path = processed_dir / "candidate_papers_venues.csv"
+            publication_resolution_path = processed_dir / "publication_resolution.json"
             venue_config = replace(config.venue_quality, core_online_enabled=core_online)
             venue_result = enrich_venue_quality(
                 title_input,
                 venue_path,
                 venue_config,
                 decisions={"include_candidate", "needs_review"},
+                survey_config=config,
+                publication_resolution_path=publication_resolution_path,
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Venue enrichment",
-                    "Adding publication type, CORE rank, and IF.",
+                    "Resolving published versions and adding venue quality metadata.",
                 ),
             )
             write_venue_quality_summary(
@@ -920,6 +977,9 @@ class PipelineService:
                 else rule_retained
             )
             initial_round["files"]["venues"] = str(venue_path)
+            initial_round["files"]["publication_resolution"] = str(
+                publication_resolution_path
+            )
             record_flow_stage(
                 initial_round,
                 key="venue_enrichment",
@@ -927,6 +987,28 @@ class PipelineService:
                 input_count=enrichment_input_count,
                 retained_count=enrichment_input_count,
                 stage_type="enrichment",
+                details={
+                    "CORE ranks found": getattr(
+                        venue_result.summary,
+                        "conferences_with_core_rank",
+                        0,
+                    ),
+                    "impact factors found": getattr(
+                        venue_result.summary,
+                        "journals_with_impact_factor",
+                        0,
+                    ),
+                    "preprints checked": getattr(
+                        venue_result.summary,
+                        "publication_resolution_attempted",
+                        0,
+                    ),
+                    "published versions resolved": getattr(
+                        venue_result.summary,
+                        "published_versions_resolved",
+                        0,
+                    ),
+                },
             )
             self._save_state(project_slug, state)
 
@@ -999,6 +1081,16 @@ class PipelineService:
                         "exclude", 0
                     ),
                     **_title_screening_counts(title_result),
+                    "publication_resolution_attempted": getattr(
+                        venue_result.summary,
+                        "publication_resolution_attempted",
+                        0,
+                    ),
+                    "published_versions_resolved": getattr(
+                        venue_result.summary,
+                        "published_versions_resolved",
+                        0,
+                    ),
                     "abstracts_found": enrichment_result.summary.with_abstract,
                     "abstracts_attempted": enrichment_result.summary.attempted,
                     "abstract_api_requests": enrichment_result.summary.api_requests,
@@ -1385,12 +1477,17 @@ class PipelineService:
                 "Updating publication metadata for the expanded pool.",
             )
             venue_path = processed_dir / f"candidate_papers_venues_round_{round_index}.csv"
+            publication_resolution_path = (
+                processed_dir / f"publication_resolution_round_{round_index}.json"
+            )
             venue_config = replace(config.venue_quality, core_online_enabled=core_online)
             venue_result = enrich_venue_quality(
                 title_input,
                 venue_path,
                 venue_config,
                 decisions={"include_candidate", "needs_review"},
+                survey_config=config,
+                publication_resolution_path=publication_resolution_path,
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Venue enrichment",
@@ -1407,6 +1504,9 @@ class PipelineService:
                 else rule_retained
             )
             round_state["files"]["venues"] = str(venue_path)
+            round_state["files"]["publication_resolution"] = str(
+                publication_resolution_path
+            )
             record_flow_stage(
                 round_state,
                 key="venue_enrichment",
@@ -1414,6 +1514,28 @@ class PipelineService:
                 input_count=enrichment_input_count,
                 retained_count=enrichment_input_count,
                 stage_type="enrichment",
+                details={
+                    "CORE ranks found": getattr(
+                        venue_result.summary,
+                        "conferences_with_core_rank",
+                        0,
+                    ),
+                    "impact factors found": getattr(
+                        venue_result.summary,
+                        "journals_with_impact_factor",
+                        0,
+                    ),
+                    "preprints checked": getattr(
+                        venue_result.summary,
+                        "publication_resolution_attempted",
+                        0,
+                    ),
+                    "published versions resolved": getattr(
+                        venue_result.summary,
+                        "published_versions_resolved",
+                        0,
+                    ),
+                },
             )
             self._save_state(project_slug, state)
 
@@ -1502,6 +1624,7 @@ class PipelineService:
                     else {}
                 ),
                 "venues": str(venue_path),
+                "publication_resolution": str(publication_resolution_path),
                 "enriched": str(enriched_path),
                 "seeds": str(seed_path),
                 **replay_files,
@@ -1527,6 +1650,16 @@ class PipelineService:
                         "exclude", 0
                     ),
                     **_title_screening_counts(title_result),
+                    "publication_resolution_attempted": getattr(
+                        venue_result.summary,
+                        "publication_resolution_attempted",
+                        0,
+                    ),
+                    "published_versions_resolved": getattr(
+                        venue_result.summary,
+                        "published_versions_resolved",
+                        0,
+                    ),
                     "abstracts_found": enrichment_result.summary.with_abstract,
                     "abstracts_attempted": enrichment_result.summary.attempted,
                     "abstract_api_requests": enrichment_result.summary.api_requests,
@@ -2173,14 +2306,17 @@ class PipelineService:
                 len(targets),
             )
             venue_config = replace(config.venue_quality, core_online_enabled=core_online)
+            publication_resolution_path = batch_dir / "publication_resolution.json"
             venue_result = enrich_venue_quality(
                 input_path,
                 venue_path,
                 venue_config,
+                survey_config=config,
+                publication_resolution_path=publication_resolution_path,
                 progress_callback=_item_progress(
                     tracked_progress,
                     "Venue enrichment",
-                    "Adding publication type, CORE rank, and IF.",
+                    "Resolving published versions and adding venue quality metadata.",
                 ),
             )
             write_venue_quality_summary(
@@ -2290,6 +2426,28 @@ class PipelineService:
                     "manual_pending": 0,
                     "manual_enriched": len(enriched_manual_rows),
                     "manual_review_additions": len(enriched_manual_rows),
+                    "manual_publication_resolution_attempted": int(
+                        target_round["counts"].get(
+                            "manual_publication_resolution_attempted"
+                        )
+                        or 0
+                    )
+                    + getattr(
+                        venue_result.summary,
+                        "publication_resolution_attempted",
+                        0,
+                    ),
+                    "manual_published_versions_resolved": int(
+                        target_round["counts"].get(
+                            "manual_published_versions_resolved"
+                        )
+                        or 0
+                    )
+                    + getattr(
+                        venue_result.summary,
+                        "published_versions_resolved",
+                        0,
+                    ),
                     "manual_abstracts_found": sum(
                         bool((row.get("abstract") or "").strip())
                         for row in enriched_manual_rows
@@ -2330,6 +2488,9 @@ class PipelineService:
                 }
             )
             target_round["files"]["manual_enrichment_latest"] = str(enriched_path)
+            target_round["files"]["manual_publication_resolution_latest"] = str(
+                publication_resolution_path
+            )
             target_round["files"]["manual_llm_screened_latest"] = str(llm_path)
             target_round["files"]["manual_llm_report_latest"] = str(llm_report_path)
             target_round["files"]["manual_recommendations_latest"] = str(
