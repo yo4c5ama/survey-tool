@@ -354,11 +354,17 @@ Included and related papers become seeds. Each round retrieves backward
 references and forward citations through the citation infrastructure, normalizes
 the records, deduplicates them against all papers already audited, and applies
 the same title filtering, metadata enrichment, abstract enrichment, optional AI
-screening, and human review process.
+screening, and human review process. **Retrieve all references and citing
+papers** is enabled by default: backward references are fetched in OpenAlex ID
+batches, while forward citations use cursor pagination ordered newest first.
+OpenAlex cache entries expire after 24 hours so later survey updates can see new
+citations.
 
-**References per seed** and **Citations per seed** cap expansion size; they are
-not relevance thresholds. Finish every manual decision in the current round
-before starting the next round. Snowballing is marked **converged** when a round
+Disable complete retrieval only when a very large citation graph requires
+per-seed safety limits. The saved snowball summary records available and fetched
+counts, truncated seeds, and per-seed resolution details. Finish every manual
+decision in the current round before starting the next round. Snowballing is
+marked **converged** when a round
 adds zero new unique papers to the review queue. This is operational convergence
 for the selected seeds, source coverage, and limits, not proof that no relevant
 paper exists anywhere.
@@ -743,7 +749,10 @@ Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank�
 
 Include 和 Related 论文共同作为 seed。每轮收集 backward references 与 forward citations，
 再与所有已审论文去重，然后重复规则筛选、标题 AI 预筛、venue/摘要补全、摘要级 AI 建议和
-人工审阅。References per seed 与 Citations per seed 是数量上限，不是相关性阈值。
+人工审阅。默认开启 **获取全部参考文献和引用论文**：参考文献按 OpenAlex ID 批量获取，引用论文
+使用 cursor 分页并优先返回最新工作。OpenAlex 缓存 24 小时后失效，后续更新能够发现新增引用。
+只有引用图特别大时才建议关闭完整模式并设置每个 seed 的安全上限。保存的 summary 会记录可用数、
+实际获取数、发生截断的 seed，以及逐 seed 的解析明细。
 
 “Converged”只表示在当前 seed、数据源和数量限制下，没有新的唯一论文进入下一轮审阅队列；
 它不证明全世界不存在遗漏文献。也可以根据预先写明的停止规则主动结束。
@@ -895,7 +904,11 @@ report は監査証跡として保存され、同じ承認版の replay は一�
 #### 3.7 Snowball
 
 Include と Related を seed とし、後方参考文献と前方引用を取得します。既査読文献と重複排除した後、
-同じ選別・補完・人手レビューを繰り返します。Converged は現在の seed、データソース、上限のもとで
+同じ選別・補完・人手レビューを繰り返します。既定では **すべての参考文献と引用論文を取得** が
+有効です。参考文献は OpenAlex ID を batch 取得し、前方引用は新しい順の cursor pagination で全件
+取得します。cache は 24 時間で失効します。非常に大きな citation graph の場合だけ完全取得を無効に
+して seed ごとの安全上限を設定できます。summary には取得可能数、実取得数、切り捨てた seed、
+seed ごとの解析結果が保存されます。Converged は現在の seed、データソース、上限のもとで
 新しいユニーク文献が review queue に入らなかったことを意味し、完全性の証明ではありません。
 
 #### 3.8 Results and AI research
@@ -1019,7 +1032,11 @@ AI가 비교해 완전한 개정 prompt, 변경 요약, 유지 원칙, 새 규�
 #### 3.7 Snowball
 
 Include와 Related 논문을 seed로 삼아 참고문헌과 인용 논문을 수집합니다. 기존 모든 검토 논문과 중복을
-제거한 뒤 같은 선별, 보강, 사람 검토를 반복합니다. Converged는 현재 seed, 소스, 제한에서 새 고유 논문이
+제거한 뒤 같은 선별, 보강, 사람 검토를 반복합니다. 기본적으로 **모든 참고문헌과 인용 논문 가져오기**가
+활성화됩니다. 참고문헌은 OpenAlex ID batch로 가져오고, 전방 인용은 최신순 cursor pagination으로 전부
+가져옵니다. cache는 24시간 뒤 만료됩니다. 인용 그래프가 매우 클 때만 전체 수집을 끄고 seed별 안전
+한도를 설정할 수 있습니다. summary에는 사용 가능 수, 실제 수집 수, 잘린 seed와 seed별 분석 결과가
+저장됩니다. Converged는 현재 seed, 소스, 제한에서 새 고유 논문이
 review queue에 들어오지 않았다는 뜻이며 완전성을 증명하지 않습니다.
 
 #### 3.8 Results and AI research

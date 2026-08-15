@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from time import time
 from typing import Any
 from urllib.parse import quote
 
@@ -38,6 +39,7 @@ OPENALEX_SELECT_FIELDS = ",".join(
         "type",
         "type_crossref",
         "referenced_works",
+        "referenced_works_count",
         "cited_by_count",
     ]
 )
@@ -86,8 +88,15 @@ class SnowballingSummary:
     seeds_resolved: int
     added_rows: int
     merged_rows: int
+    references_available: int
+    references_fetched: int
+    citations_available: int
+    citations_fetched: int
+    backward_truncated_seeds: int
+    forward_truncated_seeds: int
     by_relation: Counter[str]
     by_source: Counter[str]
+    seed_diagnostics: list[dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +109,13 @@ class SnowballingResult:
 class SeedExportResult:
     seeds: list[dict[str, str]]
     output_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievedWorks:
+    works: list[dict[str, Any]]
+    available: int
+    truncated: bool
 
 
 def snowball_candidates(
@@ -124,12 +140,12 @@ def snowball_candidates(
     if limit_seeds is not None:
         seeds = seeds[:limit_seeds]
 
-    backward_limit = (
+    backward_limit = _effective_limit(
         max_backward_per_seed
         if max_backward_per_seed is not None
         else snowball_config.max_backward_per_seed
     )
-    forward_limit = (
+    forward_limit = _effective_limit(
         max_forward_per_seed
         if max_forward_per_seed is not None
         else snowball_config.max_forward_per_seed
@@ -145,6 +161,7 @@ def snowball_candidates(
     row_index: dict[str, int] = {}
     by_relation: Counter[str] = Counter()
     by_source: Counter[str] = Counter()
+    seed_diagnostics: list[dict[str, Any]] = []
     merged_count = 0
 
     for row in input_rows:
@@ -159,6 +176,19 @@ def snowball_candidates(
     for seed_index, seed in enumerate(seeds, start=1):
         work = client.resolve_seed(seed)
         if not work:
+            seed_diagnostics.append(
+                {
+                    "seed_title": seed.title,
+                    "seed_id": seed.openalex_id,
+                    "resolved": False,
+                    "references_available": 0,
+                    "references_fetched": 0,
+                    "citations_available": 0,
+                    "citations_fetched": 0,
+                    "backward_truncated": False,
+                    "forward_truncated": False,
+                }
+            )
             if progress_callback:
                 progress_callback(seed_index, len(seeds), seed.title, len(merged_rows))
             continue
@@ -178,7 +208,8 @@ def snowball_candidates(
             by_relation["seed"] += 1
             by_source[seed.source or "manual_seed"] += 1
 
-        for referenced_work in client.referenced_works(work, limit=backward_limit):
+        references = client.referenced_works(work, limit=backward_limit)
+        for referenced_work in references.works:
             merged_count += _add_work(
                 work=referenced_work,
                 relation="backward",
@@ -192,7 +223,8 @@ def snowball_candidates(
             by_relation["backward"] += 1
             by_source[seed.source or "manual_seed"] += 1
 
-        for citing_work in client.citing_works(work, limit=forward_limit):
+        citations = client.citing_works(work, limit=forward_limit)
+        for citing_work in citations.works:
             merged_count += _add_work(
                 work=citing_work,
                 relation="forward",
@@ -205,6 +237,19 @@ def snowball_candidates(
             )
             by_relation["forward"] += 1
             by_source[seed.source or "manual_seed"] += 1
+        seed_diagnostics.append(
+            {
+                "seed_title": seed.title,
+                "seed_id": seed_id,
+                "resolved": True,
+                "references_available": references.available,
+                "references_fetched": len(references.works),
+                "citations_available": citations.available,
+                "citations_fetched": len(citations.works),
+                "backward_truncated": references.truncated,
+                "forward_truncated": citations.truncated,
+            }
+        )
         if progress_callback:
             progress_callback(seed_index, len(seeds), seed.title, len(merged_rows))
 
@@ -218,8 +263,27 @@ def snowball_candidates(
         seeds_resolved=seeds_resolved,
         added_rows=added_rows,
         merged_rows=merged_count,
+        references_available=sum(
+            int(item["references_available"]) for item in seed_diagnostics
+        ),
+        references_fetched=sum(
+            int(item["references_fetched"]) for item in seed_diagnostics
+        ),
+        citations_available=sum(
+            int(item["citations_available"]) for item in seed_diagnostics
+        ),
+        citations_fetched=sum(
+            int(item["citations_fetched"]) for item in seed_diagnostics
+        ),
+        backward_truncated_seeds=sum(
+            bool(item["backward_truncated"]) for item in seed_diagnostics
+        ),
+        forward_truncated_seeds=sum(
+            bool(item["forward_truncated"]) for item in seed_diagnostics
+        ),
         by_relation=by_relation,
         by_source=by_source,
+        seed_diagnostics=seed_diagnostics,
     )
     return SnowballingResult(rows=merged_rows, summary=summary)
 
@@ -327,8 +391,15 @@ def write_snowballing_summary(summary: SnowballingSummary, output_path: Path) ->
         "seeds_resolved": summary.seeds_resolved,
         "added_rows": summary.added_rows,
         "merged_rows": summary.merged_rows,
+        "references_available": summary.references_available,
+        "references_fetched": summary.references_fetched,
+        "citations_available": summary.citations_available,
+        "citations_fetched": summary.citations_fetched,
+        "backward_truncated_seeds": summary.backward_truncated_seeds,
+        "forward_truncated_seeds": summary.forward_truncated_seeds,
         "by_relation": dict(summary.by_relation),
         "by_source": dict(summary.by_source),
+        "seed_diagnostics": summary.seed_diagnostics,
     }
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -359,39 +430,110 @@ class OpenAlexSnowballClient:
             return self.search_title(seed.title)
         return None
 
-    def referenced_works(self, work: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-        if limit <= 0:
-            return []
-        references = work.get("referenced_works") or []
-        if not isinstance(references, list):
-            return []
-        works: list[dict[str, Any]] = []
-        for reference in references[:limit]:
-            referenced_work = self.get_work(str(reference))
-            if referenced_work:
-                works.append(referenced_work)
-        return works
+    def referenced_works(
+        self,
+        work: dict[str, Any],
+        limit: int | None,
+    ) -> RetrievedWorks:
+        raw_references = work.get("referenced_works") or []
+        if not isinstance(raw_references, list):
+            raw_references = []
+        reference_ids = list(
+            dict.fromkeys(
+                work_id
+                for item in raw_references
+                if (work_id := _openalex_short_id(str(item)))
+            )
+        )
+        reported_available = _nonnegative_int(work.get("referenced_works_count"))
+        available = max(len(reference_ids), reported_available)
+        selected_ids = reference_ids if limit is None else reference_ids[:limit]
+        works_by_id: dict[str, dict[str, Any]] = {}
+        for chunk_index in range(0, len(selected_ids), 100):
+            chunk = selected_ids[chunk_index : chunk_index + 100]
+            payload = self._request(
+                cache_key=f"references:{'|'.join(chunk)}",
+                url=OPENALEX_WORKS_URL,
+                params={
+                    "filter": f"openalex:{'|'.join(chunk)}",
+                    "per_page": len(chunk),
+                    "select": OPENALEX_SELECT_FIELDS,
+                },
+            )
+            results = payload.get("results", [])
+            if not isinstance(results, list):
+                continue
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                result_id = _openalex_short_id(str(result.get("id") or ""))
+                if result_id:
+                    works_by_id[result_id] = result
+        works = [works_by_id[item] for item in selected_ids if item in works_by_id]
+        return RetrievedWorks(
+            works=works,
+            available=available,
+            truncated=limit is not None and available > limit,
+        )
 
-    def citing_works(self, work: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-        if limit <= 0:
-            return []
+    def citing_works(
+        self,
+        work: dict[str, Any],
+        limit: int | None,
+    ) -> RetrievedWorks:
         work_id = _openalex_short_id(str(work.get("id") or ""))
         if not work_id:
-            return []
-        payload = self._request(
-            cache_key=f"cites:{work_id}:limit:{limit}",
-            url=OPENALEX_WORKS_URL,
-            params={
-                "filter": f"cites:{work_id}",
-                "per-page": min(limit, 200),
-                "sort": "cited_by_count:desc",
-                "select": OPENALEX_SELECT_FIELDS,
-            },
+            return RetrievedWorks(works=[], available=0, truncated=False)
+
+        works: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        available = _nonnegative_int(work.get("cited_by_count"))
+        cursor = "*"
+        seen_cursors: set[str] = set()
+        while cursor and cursor not in seen_cursors:
+            seen_cursors.add(cursor)
+            remaining = None if limit is None else max(limit - len(works), 0)
+            if remaining == 0:
+                break
+            page_size = min(remaining or 100, 100)
+            payload = self._request(
+                cache_key=(
+                    f"cites:{work_id}:cursor:{cursor}:page_size:{page_size}:newest"
+                ),
+                url=OPENALEX_WORKS_URL,
+                params={
+                    "filter": f"cites:{work_id}",
+                    "per_page": page_size,
+                    "cursor": cursor,
+                    "sort": "-publication_date",
+                    "select": OPENALEX_SELECT_FIELDS,
+                },
+            )
+            meta = payload.get("meta") or {}
+            if isinstance(meta, dict):
+                available = max(available, _nonnegative_int(meta.get("count")))
+            results = payload.get("results", [])
+            if not isinstance(results, list) or not results:
+                break
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                result_id = _openalex_short_id(str(result.get("id") or ""))
+                dedupe_key = result_id or _normalize_doi(str(result.get("doi") or ""))
+                if dedupe_key and dedupe_key in seen_ids:
+                    continue
+                if dedupe_key:
+                    seen_ids.add(dedupe_key)
+                works.append(result)
+                if limit is not None and len(works) >= limit:
+                    break
+            next_cursor = meta.get("next_cursor") if isinstance(meta, dict) else None
+            cursor = str(next_cursor or "")
+        return RetrievedWorks(
+            works=works,
+            available=max(available, len(works)),
+            truncated=limit is not None and available > len(works),
         )
-        results = payload.get("results", [])
-        if not isinstance(results, list):
-            return []
-        return [result for result in results[:limit] if isinstance(result, dict)]
 
     def get_work(self, work_id: str) -> dict[str, Any] | None:
         normalized = _normalize_openalex_work_id(work_id)
@@ -412,7 +554,7 @@ class OpenAlexSnowballClient:
             url=OPENALEX_WORKS_URL,
             params={
                 "filter": f'title.search:"{title}"',
-                "per-page": 5,
+                "per_page": 5,
                 "select": OPENALEX_SELECT_FIELDS,
             },
         )
@@ -439,7 +581,7 @@ class OpenAlexSnowballClient:
             request_params["mailto"] = self.email
 
         cache_path = self._cache_path(cache_key, request_params)
-        if cache_path and cache_path.exists():
+        if cache_path and cache_path.exists() and self._cache_is_fresh(cache_path):
             return json.loads(cache_path.read_text(encoding="utf-8"))
 
         payload = _request_json(
@@ -454,6 +596,10 @@ class OpenAlexSnowballClient:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return payload
+
+    def _cache_is_fresh(self, path: Path) -> bool:
+        ttl_seconds = self.config.cache_ttl_hours * 60 * 60
+        return ttl_seconds > 0 and time() - path.stat().st_mtime <= ttl_seconds
 
     def _cache_path(self, cache_key: str, params: dict[str, Any]) -> Path | None:
         if self.cache_dir is None:
@@ -720,3 +866,12 @@ def _to_int(value: Any) -> int | None:
         return int(value) if value is not None and value != "" else None
     except (TypeError, ValueError):
         return None
+
+
+def _nonnegative_int(value: Any) -> int:
+    parsed = _to_int(value)
+    return max(parsed or 0, 0)
+
+
+def _effective_limit(value: int) -> int | None:
+    return value if value > 0 else None

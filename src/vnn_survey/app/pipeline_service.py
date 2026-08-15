@@ -1189,8 +1189,8 @@ class PipelineService:
         self,
         project_slug: str,
         *,
-        max_backward_per_seed: int = 30,
-        max_forward_per_seed: int = 30,
+        max_backward_per_seed: int = 0,
+        max_forward_per_seed: int = 0,
         enrich_limit: int | None = None,
         core_online: bool = True,
         use_title_llm: bool = False,
@@ -1251,6 +1251,11 @@ class PipelineService:
                 "title_llm_enabled": use_title_llm,
                 "title_llm_batch_size": title_batch_size,
                 "replay_initial_exclusions": replay_initial_exclusions,
+                "snowball_complete_citations": (
+                    max_backward_per_seed <= 0 and max_forward_per_seed <= 0
+                ),
+                "snowball_backward_limit": max(max_backward_per_seed, 0),
+                "snowball_forward_limit": max(max_forward_per_seed, 0),
             }
         )
         self._save_state(project_slug, state)
@@ -1311,6 +1316,16 @@ class PipelineService:
                 details={
                     "new papers": snowball_result.summary.added_rows,
                     "resolved seeds": snowball_result.summary.seeds_resolved,
+                    "references available": (
+                        snowball_result.summary.references_available
+                    ),
+                    "references fetched": snowball_result.summary.references_fetched,
+                    "citations available": snowball_result.summary.citations_available,
+                    "citations fetched": snowball_result.summary.citations_fetched,
+                    "truncated seeds": (
+                        snowball_result.summary.backward_truncated_seeds
+                        + snowball_result.summary.forward_truncated_seeds
+                    ),
                 },
             )
             self._save_state(project_slug, state)
@@ -1496,6 +1511,18 @@ class PipelineService:
                     "pool_rows": snowball_result.summary.output_rows,
                     "added_rows": snowball_result.summary.added_rows,
                     "resolved_seeds": snowball_result.summary.seeds_resolved,
+                    "references_available": (
+                        snowball_result.summary.references_available
+                    ),
+                    "references_fetched": snowball_result.summary.references_fetched,
+                    "citations_available": snowball_result.summary.citations_available,
+                    "citations_fetched": snowball_result.summary.citations_fetched,
+                    "backward_truncated_seeds": (
+                        snowball_result.summary.backward_truncated_seeds
+                    ),
+                    "forward_truncated_seeds": (
+                        snowball_result.summary.forward_truncated_seeds
+                    ),
                     "rule_excluded": screening_result.summary.by_decision.get(
                         "exclude", 0
                     ),

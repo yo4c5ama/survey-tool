@@ -1801,21 +1801,50 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
                 count=summary.unreviewed,
             )
         )
+    complete_citations = st.toggle(
+        _t("Retrieve all references and citing papers"),
+        value=bool(
+            state.get("options", {}).get("snowball_complete_citations", True)
+        ),
+        key=f"snowball_complete_citations_{state['run_id']}",
+        help=_t(
+            "Recommended for systematic reviews. Disable only to set per-seed "
+            "safety limits."
+        ),
+    )
     columns = st.columns(3)
     with columns[0]:
         backward = st.number_input(
-            _t("References per seed"),
+            _t("Reference safety limit per seed"),
             min_value=1,
-            max_value=200,
-            value=30,
+            max_value=100_000,
+            value=max(
+                int(
+                    state.get("options", {}).get(
+                        "snowball_backward_limit",
+                        500,
+                    )
+                ),
+                1,
+            ),
+            disabled=complete_citations,
             key=f"snowball_backward_{state['run_id']}",
         )
     with columns[1]:
         forward = st.number_input(
-            _t("Citations per seed"),
+            _t("Citation safety limit per seed"),
             min_value=1,
-            max_value=200,
-            value=30,
+            max_value=100_000,
+            value=max(
+                int(
+                    state.get("options", {}).get(
+                        "snowball_forward_limit",
+                        500,
+                    )
+                ),
+                1,
+            ),
+            disabled=complete_citations,
             key=f"snowball_forward_{state['run_id']}",
         )
     with columns[2]:
@@ -1899,8 +1928,8 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             "snowball_discovery",
             service.start_snowball_discovery,
             project.slug,
-            max_backward_per_seed=int(backward),
-            max_forward_per_seed=int(forward),
+            max_backward_per_seed=0 if complete_citations else int(backward),
+            max_forward_per_seed=0 if complete_citations else int(forward),
             enrich_limit=_none_if_zero(abstract_limit),
             core_online=core_online,
             use_title_llm=use_title_llm,

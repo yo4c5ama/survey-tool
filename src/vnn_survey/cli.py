@@ -174,12 +174,12 @@ def snowball_candidates_cmd(
     max_backward_per_seed: int | None = typer.Option(
         None,
         "--max-backward-per-seed",
-        help="Override max backward references per seed.",
+        help="Override backward references per seed. Use 0 for all.",
     ),
     max_forward_per_seed: int | None = typer.Option(
         None,
         "--max-forward-per-seed",
-        help="Override max forward citations per seed.",
+        help="Override forward citations per seed. Use 0 for all.",
     ),
     limit_seeds: int | None = typer.Option(
         None,
@@ -697,6 +697,20 @@ def _print_snowballing_summary(summary, output_path: Path, summary_path: Path) -
     table.add_row("total", "merged_duplicate_hits", str(summary.merged_rows))
     table.add_row("seed", "loaded", str(summary.seeds_loaded))
     table.add_row("seed", "resolved", str(summary.seeds_resolved))
+    table.add_row("backward", "available", str(summary.references_available))
+    table.add_row("backward", "fetched", str(summary.references_fetched))
+    table.add_row(
+        "backward",
+        "truncated_seeds",
+        str(summary.backward_truncated_seeds),
+    )
+    table.add_row("forward", "available", str(summary.citations_available))
+    table.add_row("forward", "fetched", str(summary.citations_fetched))
+    table.add_row(
+        "forward",
+        "truncated_seeds",
+        str(summary.forward_truncated_seeds),
+    )
     for value, count in summary.by_relation.most_common():
         table.add_row("relation", value or "empty", str(count))
     for value, count in summary.by_source.most_common():

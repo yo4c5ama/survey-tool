@@ -55,11 +55,15 @@ snowballing:
   # backward references plus forward citations.
   seed_papers_path: configs/seed_papers.yaml
   cache_dir: data/cache/openalex_snowballing
+  # Re-fetch cached citation pages after one day so newly published citations
+  # can enter later survey updates. Set to 0 to refresh every request.
+  cache_ttl_hours: 24
   request_delay_seconds: 0.2
   timeout_seconds: 30
   retries: 3
-  max_backward_per_seed: 30
-  max_forward_per_seed: 30
+  # 0 means retrieve every reference/citation available from OpenAlex.
+  max_backward_per_seed: 0
+  max_forward_per_seed: 0
   include_seed_papers: true
   openalex_api_key_env: OPENALEX_API_KEY
   openalex_email_env: OPENALEX_EMAIL

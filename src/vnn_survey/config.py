@@ -94,11 +94,12 @@ class VenueQualityConfig:
 class SnowballingConfig:
     seed_papers_path: Path | None = None
     cache_dir: Path | None = None
+    cache_ttl_hours: float = 24.0
     request_delay_seconds: float = 0.2
     timeout_seconds: int = 30
     retries: int = 3
-    max_backward_per_seed: int = 30
-    max_forward_per_seed: int = 30
+    max_backward_per_seed: int = 0
+    max_forward_per_seed: int = 0
     include_seed_papers: bool = True
     openalex_api_key_env: str = "OPENALEX_API_KEY"
     openalex_email_env: str = "OPENALEX_EMAIL"
@@ -324,11 +325,21 @@ def load_config(path: Path) -> SurveyConfig:
             if snowballing.get("seed_papers_path")
             else None,
             cache_dir=Path(snowballing["cache_dir"]) if snowballing.get("cache_dir") else None,
+            cache_ttl_hours=max(
+                0.0,
+                float(snowballing.get("cache_ttl_hours", 24.0)),
+            ),
             request_delay_seconds=float(snowballing.get("request_delay_seconds", 0.2)),
             timeout_seconds=int(snowballing.get("timeout_seconds", 30)),
             retries=int(snowballing.get("retries", 3)),
-            max_backward_per_seed=int(snowballing.get("max_backward_per_seed", 30)),
-            max_forward_per_seed=int(snowballing.get("max_forward_per_seed", 30)),
+            max_backward_per_seed=max(
+                0,
+                int(snowballing.get("max_backward_per_seed", 0)),
+            ),
+            max_forward_per_seed=max(
+                0,
+                int(snowballing.get("max_forward_per_seed", 0)),
+            ),
             include_seed_papers=bool(snowballing.get("include_seed_papers", True)),
             openalex_api_key_env=str(
                 snowballing.get("openalex_api_key_env", "OPENALEX_API_KEY")
