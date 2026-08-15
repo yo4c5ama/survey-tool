@@ -15,7 +15,7 @@ from vnn_survey.ai_research import (
     PaperWorkspace,
     estimate_corpus_requests,
 )
-from vnn_survey.app.audit import load_audit
+from vnn_survey.app.audit import AuditSummary, load_audit
 from vnn_survey.app.i18n import LANGUAGE_NAMES, language_name, translate
 from vnn_survey.app.manual_papers import ManualPaperStore, create_manual_record
 from vnn_survey.app.pipeline_service import (
@@ -1439,24 +1439,8 @@ def _render_manual_review(
     round_state = next(item for item in review_rounds if int(item["index"]) == round_index)
     audit_path = Path(round_state["files"]["audit"])
     _, rows, summary = load_audit(audit_path)
-    autosave_feedback = st.session_state.pop(
-        f"audit_autosave_feedback_{state['run_id']}_{round_index}",
-        None,
-    )
-    if autosave_feedback:
-        st.success(
-            _t(
-                "Saved {reviewed} reviewed papers; {unreviewed} still require a decision.",
-                reviewed=autosave_feedback[0],
-                unreviewed=autosave_feedback[1],
-            )
-        )
-    metrics = st.columns(5)
-    metrics[0].metric(_t("Candidates"), summary.total)
-    metrics[1].metric(_t("Reviewed"), summary.reviewed)
-    metrics[2].metric(_t("Include"), summary.by_decision.get("include", 0))
-    metrics[3].metric(_t("Related"), summary.by_decision.get("include_related", 0))
-    metrics[4].metric(_t("Exclude"), summary.by_decision.get("exclude", 0))
+    metric_slots = [column.empty() for column in st.columns(5)]
+    _render_audit_metrics(metric_slots, summary)
 
     frame = pd.DataFrame(rows).fillna("")
     filter_col, decision_col = st.columns([2, 1])
@@ -1536,13 +1520,15 @@ def _render_manual_review(
     updated_rows = _merge_editor_identity(filtered, edited)
     if _audit_rows_changed(filtered, updated_rows):
         saved_summary = service.update_audit(project.slug, round_index, updated_rows)
-        st.session_state[
-            f"audit_autosave_feedback_{state['run_id']}_{round_index}"
-        ] = (
-            saved_summary.reviewed,
-            saved_summary.unreviewed,
+        _render_audit_metrics(metric_slots, saved_summary)
+        st.toast(
+            _t(
+                "Saved {reviewed} reviewed papers; {unreviewed} still require a decision.",
+                reviewed=saved_summary.reviewed,
+                unreviewed=saved_summary.unreviewed,
+            ),
+            icon=":material/check:",
         )
-        st.rerun()
 
     st.download_button(
         _t("Download this audit CSV"),
@@ -1592,6 +1578,16 @@ def _render_manual_review(
         embedded=True,
         target_round_index=round_index,
     )
+
+
+def _render_audit_metrics(metric_slots: list[Any], summary: AuditSummary) -> None:
+    metric_slots[0].metric(_t("Candidates"), summary.total)
+    metric_slots[1].metric(_t("Reviewed"), summary.reviewed)
+    metric_slots[2].metric(_t("Include"), summary.by_decision.get("include", 0))
+    metric_slots[3].metric(
+        _t("Related"), summary.by_decision.get("include_related", 0)
+    )
+    metric_slots[4].metric(_t("Exclude"), summary.by_decision.get("exclude", 0))
 
 
 def _render_prompt_refinement(
