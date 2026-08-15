@@ -27,6 +27,6 @@ fi
 
 cd "$ROOT_DIR"
 printf '%s\n' "Preparing SurveyFlow. The first start may download Python and dependencies..."
-"$UV_BIN" sync --frozen --no-dev
+"$UV_BIN" sync --frozen --no-dev --reinstall-package vnn-survey
 printf '%s\n' "Opening SurveyFlow at http://localhost:${SURVEYFLOW_PORT:-8501}"
-exec "$UV_BIN" run vnn-survey-app
+exec "$UV_BIN" run --frozen --no-dev --no-sync vnn-survey-app

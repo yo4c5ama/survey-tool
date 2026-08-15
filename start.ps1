@@ -20,10 +20,10 @@ if ($UvCommand) {
 
 Set-Location $RootDir
 Write-Host "Preparing SurveyFlow. The first start may download Python and dependencies..."
-& $Uv sync --frozen --no-dev
+& $Uv sync --frozen --no-dev --reinstall-package vnn-survey
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $Port = if ($env:SURVEYFLOW_PORT) { $env:SURVEYFLOW_PORT } else { "8501" }
 Write-Host "Opening SurveyFlow at http://localhost:$Port"
-& $Uv run vnn-survey-app
+& $Uv run --frozen --no-dev --no-sync vnn-survey-app
 exit $LASTEXITCODE
