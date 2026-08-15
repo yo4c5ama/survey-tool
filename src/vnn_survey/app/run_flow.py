@@ -14,6 +14,7 @@ def record_flow_stage(
     excluded_count: int | None = None,
     stage_type: str = "filter",
     details: dict[str, int | str] | None = None,
+    loop_to: str | None = None,
 ) -> None:
     """Insert or replace a persisted literature-flow stage for one round."""
 
@@ -33,6 +34,8 @@ def record_flow_stage(
         "excluded": excluded_value,
         "details": dict(details or {}),
     }
+    if loop_to:
+        stage["loop_to"] = loop_to
     stages = round_state.setdefault("flow", [])
     for index, existing in enumerate(stages):
         if existing.get("key") == key:
@@ -133,6 +136,26 @@ def build_flow_svg(state: dict[str, Any]) -> str:
             parts.append(
                 f'<text x="{x + 11}" y="{node_y + 94}" font-family="Arial, sans-serif" '
                 f'font-size="10" fill="#596273">{escape(change)}</text>'
+            )
+        positions = {str(stage.get("key") or ""): index for index, stage in enumerate(stages)}
+        for stage_index, stage in enumerate(stages):
+            target_index = positions.get(str(stage.get("loop_to") or ""))
+            if target_index is None or target_index >= stage_index:
+                continue
+            source_x = 18 + stage_index * 190 + 81
+            target_x = 18 + target_index * 190 + 81
+            node_bottom = y + 24 + 116
+            loop_y = node_bottom + 30
+            parts.append(
+                f'<path d="M {source_x} {node_bottom} C {source_x} {loop_y}, '
+                f'{target_x} {loop_y}, {target_x} {node_bottom}" fill="none" '
+                'stroke="#397d73" stroke-width="1.8" stroke-dasharray="5 3" '
+                'marker-end="url(#arrow)"/>'
+            )
+            parts.append(
+                f'<text x="{min(source_x, target_x) + 8}" y="{loop_y - 5}" '
+                'font-family="Arial, sans-serif" font-size="10" fill="#397d73">'
+                "manual enrichment loop</text>"
             )
     parts.append("</svg>")
     return "".join(parts)

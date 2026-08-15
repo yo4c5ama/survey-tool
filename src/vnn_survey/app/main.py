@@ -1255,8 +1255,8 @@ def _render_manual_additions(
                 st.error(_runtime_text(str(exc)))
 
     st.divider()
-    st.subheader(_t("Apply to discovery"))
     if not state:
+        st.subheader(_t("Apply to discovery"))
         st.info(_t("Saved papers will be included automatically in the next initial discovery."))
         return
     initial_round = next(
@@ -1264,16 +1264,62 @@ def _render_manual_additions(
         None,
     )
     if not initial_round:
+        st.subheader(_t("Apply to discovery"))
         st.info(_t("Saved papers will be included automatically in the next initial discovery."))
         return
     if any(item.get("files", {}).get("audit") for item in state.get("rounds", [])):
-        st.success(
-            _t(
-                "New manual papers are added directly to the selected review round and update "
-                "the literature flow immediately."
+        active_round_index = (
+            target_round_index
+            if target_round_index is not None
+            else int(
+                next(
+                    item
+                    for item in reversed(state["rounds"])
+                    if item.get("files", {}).get("audit")
+                )["index"]
             )
         )
+        enrichment_status = service.manual_enrichment_status(
+            project.slug,
+            active_round_index,
+        )
+        st.subheader(_t("Manual enrichment loop"))
+        st.write(
+            _t(
+                "Start the pending researcher additions at venue and abstract enrichment. "
+                "Completed papers return to the selected manual review round."
+            )
+        )
+        status_columns = st.columns(2)
+        status_columns[0].metric(
+            _t("Pending enrichment"),
+            enrichment_status["pending"],
+        )
+        status_columns[1].metric(
+            _t("Enriched manual papers"),
+            enrichment_status["enriched"],
+        )
+        if st.button(
+            _t("Start enrichment and add to review"),
+            type="primary",
+            icon=":material/play_arrow:",
+            width="stretch",
+            disabled=not enrichment_status["pending"] or bool(task and task.running),
+            key=f"manual_enrichment_start_{project.slug}_{active_round_index}",
+        ):
+            started = _task_manager().start(
+                project.slug,
+                "manual_enrichment",
+                service.enrich_manual_additions,
+                project.slug,
+                active_round_index,
+            )
+            if started:
+                st.rerun()
+            else:
+                st.warning(_t("A pipeline task is already running for this project."))
         return
+    st.subheader(_t("Apply to discovery"))
     st.write(
         _t(
             "Synchronize the saved papers into the current candidate pool before creating "
@@ -1381,17 +1427,6 @@ def _render_manual_review(
         key=f"audit_round_{state['run_id']}",
     )
     round_state = next(item for item in review_rounds if int(item["index"]) == round_index)
-    reconcile_key = f"manual_reconciled_{state['run_id']}_{round_index}"
-    task = _task_manager().snapshot(project.slug)
-    if not st.session_state.get(reconcile_key) and not (task and task.running):
-        st.session_state[reconcile_key] = True
-        reconciled = service.reconcile_saved_manual_papers(project.slug, round_index)
-        if reconciled["added"]:
-            st.session_state[f"manual_addition_feedback_{project.slug}"] = {
-                "status": "reconciled_saved_papers",
-                "count": reconciled["added"],
-            }
-            st.rerun()
     audit_path = Path(round_state["files"]["audit"])
     _, rows, summary = load_audit(audit_path)
     autosave_feedback = st.session_state.pop(
@@ -2105,7 +2140,27 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
                 + (f'<div class="survey-flow-detail">{detail_text}</div>' if detail_text else "")
                 + "</div>"
             )
-            if index < len(stages) - 1:
+            loop_to = str(stage.get("loop_to") or "")
+            if loop_to:
+                target = next(
+                    (
+                        candidate
+                        for candidate in stages
+                        if candidate.get("key") == loop_to
+                    ),
+                    {},
+                )
+                nodes.append(
+                    '<div class="survey-flow-loop">&#8634; '
+                    + escape(
+                        _t(
+                            "Returns to {stage}",
+                            stage=_t(str(target.get("label") or loop_to)),
+                        )
+                    )
+                    + "</div>"
+                )
+            elif index < len(stages) - 1:
                 nodes.append('<div class="survey-flow-arrow" aria-hidden="true">&#8594;</div>')
         st.markdown(f'<div class="survey-flow">{"".join(nodes)}</div>', unsafe_allow_html=True)
 
@@ -2262,6 +2317,14 @@ def _render_manual_addition_feedback(result: dict[str, Any]) -> None:
                 round_index=result.get("round_index", ""),
             )
         )
+    elif status == "queued_for_enrichment":
+        st.success(
+            _t(
+                "Paper saved. Start the enrichment loop below to add it to review round "
+                "{round_index}.",
+                round_index=result.get("round_index", ""),
+            )
+        )
     elif status == "already_in_review":
         st.info(
             _t(
@@ -2279,13 +2342,6 @@ def _render_manual_addition_feedback(result: dict[str, Any]) -> None:
         )
     elif status == "removed_from_collection":
         st.success(_t("The manual paper was removed."))
-    elif status == "reconciled_saved_papers":
-        st.success(
-            _t(
-                "Added {count} previously saved manual papers to this review round.",
-                count=result.get("count", 0),
-            )
-        )
     elif result.get("collection_added"):
         st.success(_t("Paper added to the manual collection."))
     else:
@@ -2747,6 +2803,13 @@ def _apply_styles() -> None:
         .survey-flow-change {font-size: 0.74rem; color: #596273; margin-top: 2px;}
         .survey-flow-detail {font-size: 0.7rem; color: #6b7280; line-height: 1.25; margin-top: 8px;}
         .survey-flow-arrow {flex: 0 0 auto; color: #6b7280; font-size: 1.2rem;}
+        .survey-flow-loop {
+            flex: 0 0 132px;
+            color: #397d73;
+            font-size: 0.76rem;
+            font-weight: 650;
+            line-height: 1.3;
+        }
         h1, h2, h3, p, label, button {letter-spacing: 0 !important;}
         </style>
         """,

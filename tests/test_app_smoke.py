@@ -170,6 +170,10 @@ def test_manual_review_embeds_live_paper_addition_workspace(
     assert any(
         item.key == "manual_lookup_title_integrated-review" for item in app.text_input
     )
+    assert any(
+        item.key == "manual_enrichment_start_integrated-review_0"
+        for item in app.button
+    )
     assert any("saved automatically" in item.value for item in app.caption)
 
 

@@ -70,6 +70,12 @@ MANUAL_SYNC_STAGES = [
     "Venue enrichment",
     "Abstract enrichment",
 ]
+MANUAL_ENRICHMENT_STAGES = [
+    "Manual additions",
+    "Venue enrichment",
+    "Abstract enrichment",
+    "Return to manual review",
+]
 CORPUS_ANALYSIS_STAGES = [
     "Taxonomy design",
     "Paper classification",
@@ -1564,7 +1570,7 @@ class PipelineService:
         *,
         round_index: int | None = None,
     ) -> dict[str, Any]:
-        """Persist a known paper and append it to an active audit queue when possible."""
+        """Persist a known paper and queue it for the manual enrichment loop."""
 
         manual_store = ManualPaperStore(self.store.project_dir(project_slug))
         saved, collection_added = manual_store.add(record, note)
@@ -1593,73 +1599,273 @@ class PipelineService:
                     "collection_added": collection_added,
                 }
 
-        if round_index is None:
-            target_round = audit_rounds[-1]
-        else:
-            target_round = next(
-                (item for item in audit_rounds if int(item["index"]) == round_index),
-                None,
-            )
-            if target_round is None:
-                raise RuntimeError(f"Review round {round_index} is not available.")
-
-        audit_path = Path(target_round["files"]["audit"])
-        fieldnames, rows = read_csv(audit_path)
-        prepared = _manual_audit_row(saved, note)
-        output_fields = list(dict.fromkeys([*fieldnames, *prepared]))
-        rows.append(prepared)
-        write_audit_csv(audit_path, rows, output_fields)
-
-        summary = summarize_audit(rows)
-        target_round["counts"]["audit_queue"] = summary.total
+        target_round = _select_audit_round(audit_rounds, round_index)
         target_round["counts"]["manual_records"] = len(manual_store.load())
-        target_round["counts"]["manual_review_additions"] = (
-            int(target_round["counts"].get("manual_review_additions") or 0) + 1
+        target_round["counts"]["manual_pending"] = len(
+            _manual_enrichment_targets(
+                manual_store.load(),
+                _audit_rows_by_round(audit_rounds),
+                int(target_round["index"]),
+            )
         )
-        direct_additions = target_round["counts"]["manual_review_additions"]
-        record_flow_stage(
-            target_round,
-            key="manual_review_additions",
-            label="Manual review additions",
-            input_count=max(summary.total - direct_additions, 0),
-            retained_count=summary.total,
-            excluded_count=0,
-            stage_type="discovery",
-            details={"added by researcher": direct_additions},
-        )
-        _move_flow_stage_before(
-            target_round,
-            "manual_review_additions",
-            {"human_audit", "final_corpus"},
-        )
-        _apply_audit_summary(target_round, summary)
-        target_round["status"] = "ready_for_review"
-        state["status"] = "awaiting_manual_review"
-        progress_count = state.get("progress", {}).get("paper_count")
-        _set_progress_paper_count(
-            state,
-            int(progress_count) + 1
-            if progress_count not in (None, "")
-            else summary.total,
-        )
-        _invalidate_derived_outputs(state)
         self._save_state(project_slug, state)
         return {
-            "status": "added_to_review",
+            "status": "queued_for_enrichment",
             "round_index": int(target_round["index"]),
             "collection_added": collection_added,
-            "audit_total": summary.total,
+            "pending": target_round["counts"]["manual_pending"],
         }
+
+    def manual_enrichment_status(
+        self,
+        project_slug: str,
+        round_index: int,
+    ) -> dict[str, int]:
+        state = self.load_current_state(project_slug)
+        audit_rounds = [
+            item for item in state.get("rounds", []) if item.get("files", {}).get("audit")
+        ]
+        target_round = _select_audit_round(audit_rounds, round_index)
+        manual_records = ManualPaperStore(self.store.project_dir(project_slug)).load()
+        rows_by_round = _audit_rows_by_round(audit_rounds)
+        targets = _manual_enrichment_targets(
+            manual_records,
+            rows_by_round,
+            int(target_round["index"]),
+        )
+        target_rows = dict(rows_by_round)[int(target_round["index"])]
+        return {
+            "saved": len(manual_records),
+            "pending": len(targets),
+            "enriched": sum(
+                _is_direct_manual_audit_row(row)
+                and _manual_enrichment_completed(row)
+                for row in target_rows
+            ),
+        }
+
+    def enrich_manual_additions(
+        self,
+        project_slug: str,
+        round_index: int,
+        *,
+        enrich_limit: int | None = None,
+        core_online: bool = True,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """Enrich queued researcher additions and return them to an audit round."""
+
+        state = self.load_current_state(project_slug)
+        audit_rounds = [
+            item for item in state.get("rounds", []) if item.get("files", {}).get("audit")
+        ]
+        target_round = _select_audit_round(audit_rounds, round_index)
+        manual_store = ManualPaperStore(self.store.project_dir(project_slug))
+        manual_records = manual_store.load()
+        targets = _manual_enrichment_targets(
+            manual_records,
+            _audit_rows_by_round(audit_rounds),
+            int(target_round["index"]),
+        )
+        if not targets:
+            raise RuntimeError("No manually added papers are waiting for enrichment.")
+
+        audit_path = Path(target_round["files"]["audit"])
+        _, current_audit_rows, current_summary = load_audit(audit_path)
+        config = load_config(self.store.config_path(project_slug))
+        batch_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        batch_dir = (
+            self.store.project_dir(project_slug)
+            / "runs"
+            / state["run_id"]
+            / "manual_enrichment"
+            / f"round_{round_index}"
+            / batch_id
+        )
+        input_path = batch_dir / "manual_input.csv"
+        venue_path = batch_dir / "manual_venues.csv"
+        enriched_path = batch_dir / "manual_enriched.csv"
+        input_rows = [_manual_enrichment_input(record) for record in targets]
+        input_fields = list(dict.fromkeys(key for row in input_rows for key in row))
+        write_audit_csv(input_path, input_rows, input_fields)
+
+        tracked_progress = self._begin_progress(
+            project_slug,
+            state,
+            operation="Manual paper enrichment",
+            heading="Enriching manually added papers",
+            stages=MANUAL_ENRICHMENT_STAGES,
+            callback=progress,
+            paper_count=current_summary.total,
+        )
+        try:
+            _notify(
+                tracked_progress,
+                "Manual additions",
+                "Deduplicating researcher additions before enrichment.",
+                len(targets),
+                len(targets),
+            )
+            venue_config = replace(config.venue_quality, core_online_enabled=core_online)
+            venue_result = enrich_venue_quality(
+                input_path,
+                venue_path,
+                venue_config,
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "Venue enrichment",
+                    "Adding publication type, CORE rank, and IF.",
+                ),
+            )
+            write_venue_quality_summary(
+                venue_result.summary,
+                batch_dir / "venue_quality_summary.json",
+            )
+            enrichment_result = enrich_candidates(
+                venue_path,
+                enriched_path,
+                config.enrichment,
+                limit=enrich_limit,
+                progress_callback=_item_progress(
+                    tracked_progress,
+                    "Abstract enrichment",
+                    "Looking up missing abstracts through the configured provider chain.",
+                ),
+            )
+            write_enrichment_summary(
+                enrichment_result.summary,
+                batch_dir / "abstract_enrichment_summary.json",
+            )
+
+            _notify(
+                tracked_progress,
+                "Return to manual review",
+                "Writing enriched papers back to the selected review round.",
+            )
+            fieldnames, audit_rows = read_csv(audit_path)
+            appended = 0
+            for enriched_row in enrichment_result.rows:
+                match_index = next(
+                    (
+                        index
+                        for index, audit_row in enumerate(audit_rows)
+                        if _audit_rows_match(audit_row, enriched_row)
+                    ),
+                    None,
+                )
+                if match_index is None:
+                    prepared = _manual_audit_row(
+                        PaperRecord.from_dict(enriched_row),
+                        enriched_row.get("manual_note", ""),
+                    )
+                    prepared.update(enriched_row)
+                    audit_rows.append(prepared)
+                    match_index = len(audit_rows) - 1
+                    appended += 1
+                else:
+                    decision = audit_rows[match_index].get("manual_decision", "")
+                    notes = audit_rows[match_index].get("manual_notes", "")
+                    audit_rows[match_index].update(enriched_row)
+                    audit_rows[match_index]["manual_decision"] = decision
+                    audit_rows[match_index]["manual_notes"] = notes
+                audit_rows[match_index].update(
+                    {
+                        "auto_screening_decision": "needs_review",
+                        "auto_screening_reason": "Added directly by the researcher.",
+                        "final_recommendation": "manual_review",
+                        "final_priority": "1",
+                        "final_reason": (
+                            "Enriched researcher addition returned for human review."
+                        ),
+                        "manual_review_added": "true",
+                        "manual_enrichment_status": "completed",
+                        "manual_enriched_at": _now(),
+                    }
+                )
+
+            output_fields = list(
+                dict.fromkeys([*fieldnames, *(key for row in audit_rows for key in row)])
+            )
+            write_audit_csv(audit_path, audit_rows, output_fields)
+            summary = summarize_audit(audit_rows)
+            _apply_audit_summary(target_round, summary)
+            enriched_manual_rows = [
+                row
+                for row in audit_rows
+                if _is_direct_manual_audit_row(row)
+                and _manual_enrichment_completed(row)
+            ]
+            target_round["counts"].update(
+                {
+                    "audit_queue": summary.total,
+                    "manual_records": len(manual_records),
+                    "manual_pending": 0,
+                    "manual_enriched": len(enriched_manual_rows),
+                    "manual_review_additions": len(enriched_manual_rows),
+                    "manual_abstracts_found": sum(
+                        bool((row.get("abstract") or "").strip())
+                        for row in enriched_manual_rows
+                    ),
+                    "abstract_api_requests": int(
+                        target_round["counts"].get("abstract_api_requests") or 0
+                    )
+                    + enrichment_result.summary.api_requests,
+                    "abstract_batch_requests": int(
+                        target_round["counts"].get("abstract_batch_requests") or 0
+                    )
+                    + enrichment_result.summary.batch_requests,
+                    "abstract_cache_hits": int(
+                        target_round["counts"].get("abstract_cache_hits") or 0
+                    )
+                    + enrichment_result.summary.cache_hits,
+                    "abstract_rate_limit_retries": int(
+                        target_round["counts"].get("abstract_rate_limit_retries") or 0
+                    )
+                    + enrichment_result.summary.rate_limit_retries,
+                    "abstract_rate_limit_wait_seconds": float(
+                        target_round["counts"].get("abstract_rate_limit_wait_seconds")
+                        or 0
+                    )
+                    + enrichment_result.summary.rate_limit_wait_seconds,
+                }
+            )
+            target_round["files"]["manual_enrichment_latest"] = str(enriched_path)
+            _record_manual_enrichment_flow(target_round, audit_rows)
+            target_round["status"] = "ready_for_review"
+            target_round["error"] = ""
+            state["status"] = "awaiting_manual_review"
+            _set_progress_paper_count(state, summary.total)
+            _invalidate_derived_outputs(state)
+            self._save_state(project_slug, state)
+            self._complete_progress(
+                project_slug,
+                state,
+                progress,
+                stage="Return to manual review",
+                message=(
+                    f"Enriched {len(targets)} manually added papers; "
+                    f"{appended} entered the review queue."
+                ),
+                paper_count=summary.total,
+            )
+            return state
+        except TaskCancelled:
+            self._mark_progress_cancelled(project_slug, state)
+            return state
+        except Exception as exc:
+            self._mark_progress_failed(project_slug, state, exc)
+            raise
 
     def remove_manual_paper(
         self,
         project_slug: str,
         record: PaperRecord,
     ) -> dict[str, Any]:
-        """Remove a saved paper and any audit row created by direct manual addition."""
+        """Remove a saved paper and any audit row created by manual enrichment."""
 
         manual_store = ManualPaperStore(self.store.project_dir(project_slug))
         collection_removed = manual_store.remove(record.dedupe_key())
+        manual_records = manual_store.load()
         state = self.current_state_or_none(project_slug)
         if state is None:
             return {
@@ -1691,40 +1897,41 @@ class PipelineService:
             write_audit_csv(audit_path, retained, fieldnames)
             summary = summarize_audit(retained)
             round_state["counts"]["audit_queue"] = summary.total
-            round_state["counts"]["manual_records"] = len(manual_store.load())
-            direct_additions = max(
-                int(round_state["counts"].get("manual_review_additions") or 0)
-                - removed_here,
-                0,
+            round_state["counts"]["manual_records"] = len(manual_records)
+            enriched_manual_rows = [
+                row
+                for row in retained
+                if _is_direct_manual_audit_row(row)
+                and _manual_enrichment_completed(row)
+            ]
+            round_state["counts"]["manual_enriched"] = len(enriched_manual_rows)
+            round_state["counts"]["manual_review_additions"] = len(
+                enriched_manual_rows
             )
-            round_state["counts"]["manual_review_additions"] = direct_additions
-            if direct_additions:
-                record_flow_stage(
-                    round_state,
-                    key="manual_review_additions",
-                    label="Manual review additions",
-                    input_count=max(summary.total - direct_additions, 0),
-                    retained_count=summary.total,
-                    excluded_count=0,
-                    stage_type="discovery",
-                    details={"added by researcher": direct_additions},
-                )
-                _move_flow_stage_before(
-                    round_state,
-                    "manual_review_additions",
-                    {"human_audit", "final_corpus"},
-                )
-            else:
-                round_state["flow"] = [
-                    stage
-                    for stage in round_state.get("flow", [])
-                    if stage.get("key") != "manual_review_additions"
-                ]
             _apply_audit_summary(round_state, summary)
+            _record_manual_enrichment_flow(round_state, retained)
 
-        if review_rows_removed:
+        if collection_removed:
+            audit_rounds = [
+                item
+                for item in state.get("rounds", [])
+                if item.get("files", {}).get("audit")
+            ]
+            rows_by_round = _audit_rows_by_round(audit_rounds)
+            for round_state in audit_rounds:
+                round_state["counts"]["manual_records"] = len(manual_records)
+                if "manual_pending" in round_state["counts"]:
+                    round_state["counts"]["manual_pending"] = len(
+                        _manual_enrichment_targets(
+                            manual_records,
+                            rows_by_round,
+                            int(round_state["index"]),
+                        )
+                    )
+
+        if collection_removed or review_rows_removed:
             progress_count = state.get("progress", {}).get("paper_count")
-            if progress_count not in (None, ""):
+            if review_rows_removed and progress_count not in (None, ""):
                 _set_progress_paper_count(
                     state,
                     max(int(progress_count) - review_rows_removed, 0),
@@ -1740,32 +1947,6 @@ class PipelineService:
             ),
             "collection_removed": collection_removed,
             "review_rows_removed": review_rows_removed,
-        }
-
-    def reconcile_saved_manual_papers(
-        self,
-        project_slug: str,
-        round_index: int,
-    ) -> dict[str, int]:
-        """Backfill saved manual records created before live review insertion existed."""
-
-        manual_store = ManualPaperStore(self.store.project_dir(project_slug))
-        added = 0
-        already_present = 0
-        for record in manual_store.load():
-            result = self.add_manual_paper(
-                project_slug,
-                record,
-                record.manual_note or "",
-                round_index=round_index,
-            )
-            if result["status"] == "added_to_review":
-                added += 1
-            elif result["status"] == "already_in_review":
-                already_present += 1
-        return {
-            "added": added,
-            "already_present": already_present,
         }
 
     def generate_exports(self, project_slug: str) -> dict[str, Path]:
@@ -2140,6 +2321,21 @@ def _manual_audit_row(record: PaperRecord, note: str) -> dict[str, str]:
     return row
 
 
+def _manual_enrichment_input(record: PaperRecord) -> dict[str, str]:
+    row = {
+        str(key): "" if value is None else str(value)
+        for key, value in record.to_row().items()
+    }
+    row.update(
+        {
+            "auto_screening_decision": "needs_review",
+            "manual_review_added": "true",
+            "manual_enrichment_status": "pending",
+        }
+    )
+    return row
+
+
 def _audit_row_matches_record(row: dict[str, str], record: PaperRecord) -> bool:
     try:
         existing = PaperRecord.from_dict(row)
@@ -2148,11 +2344,160 @@ def _audit_row_matches_record(row: dict[str, str], record: PaperRecord) -> bool:
     return len(dedupe_records([existing, record])) == 1
 
 
+def _audit_rows_match(first: dict[str, str], second: dict[str, str]) -> bool:
+    try:
+        return _audit_row_matches_record(first, PaperRecord.from_dict(second))
+    except (TypeError, ValueError):
+        return False
+
+
 def _is_direct_manual_audit_row(row: dict[str, str]) -> bool:
     marker = (row.get("manual_review_added") or "").strip().lower()
     if marker in {"true", "1", "yes"}:
         return True
     return row.get("final_reason") == "Added directly by the researcher for human review."
+
+
+def _manual_enrichment_completed(row: dict[str, str]) -> bool:
+    return (row.get("manual_enrichment_status") or "").strip().lower() == "completed"
+
+
+def _select_audit_round(
+    audit_rounds: list[dict[str, Any]],
+    round_index: int | None,
+) -> dict[str, Any]:
+    if not audit_rounds:
+        raise RuntimeError("No manual review round is available.")
+    if round_index is None:
+        return audit_rounds[-1]
+    target = next(
+        (item for item in audit_rounds if int(item["index"]) == round_index),
+        None,
+    )
+    if target is None:
+        raise RuntimeError(f"Review round {round_index} is not available.")
+    return target
+
+
+def _audit_rows_by_round(
+    audit_rounds: list[dict[str, Any]],
+) -> list[tuple[int, list[dict[str, str]]]]:
+    return [
+        (int(round_state["index"]), read_csv(Path(round_state["files"]["audit"]))[1])
+        for round_state in audit_rounds
+    ]
+
+
+def _manual_enrichment_targets(
+    manual_records: list[PaperRecord],
+    rows_by_round: list[tuple[int, list[dict[str, str]]]],
+    target_round_index: int,
+) -> list[PaperRecord]:
+    targets: list[PaperRecord] = []
+    for record in manual_records:
+        matches = [
+            (round_index, row)
+            for round_index, rows in rows_by_round
+            for row in rows
+            if _audit_row_matches_record(row, record)
+        ]
+        if not matches:
+            targets.append(record)
+            continue
+        target_match = next(
+            (
+                row
+                for round_index, row in matches
+                if round_index == target_round_index
+                and _is_direct_manual_audit_row(row)
+                and not _manual_enrichment_completed(row)
+            ),
+            None,
+        )
+        if target_match is not None:
+            targets.append(
+                dedupe_records([record, PaperRecord.from_dict(target_match)])[0]
+            )
+    return dedupe_records(targets)
+
+
+def _record_manual_enrichment_flow(
+    round_state: dict[str, Any],
+    audit_rows: list[dict[str, str]],
+) -> None:
+    loop_keys = {
+        "manual_review_additions",
+        "manual_loop_additions",
+        "manual_venue_enrichment",
+        "manual_abstract_enrichment",
+        "manual_return_to_review",
+    }
+    base_stages = [
+        stage
+        for stage in round_state.get("flow", [])
+        if stage.get("key") not in loop_keys
+    ]
+    manual_rows = [
+        row
+        for row in audit_rows
+        if _is_direct_manual_audit_row(row) and _manual_enrichment_completed(row)
+    ]
+    if not manual_rows:
+        round_state["flow"] = base_stages
+        return
+
+    count = len(manual_rows)
+    abstracts_found = sum(bool((row.get("abstract") or "").strip()) for row in manual_rows)
+    ranked = sum(bool(row.get("core_rank") or row.get("impact_factor")) for row in manual_rows)
+    loop_holder: dict[str, Any] = {"flow": []}
+    record_flow_stage(
+        loop_holder,
+        key="manual_loop_additions",
+        label="Researcher additions",
+        input_count=count,
+        retained_count=count,
+        excluded_count=0,
+        stage_type="discovery",
+        details={"submitted": count},
+    )
+    record_flow_stage(
+        loop_holder,
+        key="manual_venue_enrichment",
+        label="Manual venue enrichment",
+        input_count=count,
+        retained_count=count,
+        stage_type="enrichment",
+        details={"rank or IF found": ranked},
+    )
+    record_flow_stage(
+        loop_holder,
+        key="manual_abstract_enrichment",
+        label="Manual abstract enrichment",
+        input_count=count,
+        retained_count=count,
+        stage_type="enrichment",
+        details={"abstracts found": abstracts_found},
+    )
+    record_flow_stage(
+        loop_holder,
+        key="manual_return_to_review",
+        label="Return to manual review",
+        input_count=count,
+        retained_count=count,
+        stage_type="review",
+        details={"review queue total": len(audit_rows)},
+        loop_to="human_audit",
+    )
+    insert_at = next(
+        (
+            index + 1
+            for index, stage in enumerate(base_stages)
+            if stage.get("key") == "human_audit"
+        ),
+        len(base_stages),
+    )
+    base_stages[insert_at:insert_at] = loop_holder["flow"]
+    round_state["flow"] = base_stages
 
 
 def _apply_audit_summary(
@@ -2175,24 +2520,6 @@ def _apply_audit_summary(
         stage_type="review",
         details={"pending": summary.unreviewed},
     )
-
-
-def _move_flow_stage_before(
-    round_state: dict[str, Any],
-    key: str,
-    before_keys: set[str],
-) -> None:
-    stages = round_state.get("flow", [])
-    stage = next((item for item in stages if item.get("key") == key), None)
-    if stage is None:
-        return
-    retained = [item for item in stages if item.get("key") != key]
-    insert_at = next(
-        (index for index, item in enumerate(retained) if item.get("key") in before_keys),
-        len(retained),
-    )
-    retained.insert(insert_at, stage)
-    round_state["flow"] = retained
 
 
 def _invalidate_derived_outputs(state: dict[str, Any]) -> None:

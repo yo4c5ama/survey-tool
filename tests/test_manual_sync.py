@@ -88,7 +88,7 @@ def test_manual_papers_can_be_added_and_removed_before_review(tmp_path: Path) ->
     assert [row["title"] for row in rows] == ["Automatically Found"]
 
 
-def test_manual_paper_enters_existing_review_and_updates_flow(tmp_path: Path) -> None:
+def test_manual_paper_is_enriched_before_entering_existing_review(tmp_path: Path) -> None:
     store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
     project = store.create_project(
         name="Live Manual Review",
@@ -175,11 +175,26 @@ def test_manual_paper_enters_existing_review_and_updates_flow(tmp_path: Path) ->
     result = service.add_manual_paper(project.slug, manual, "Known relevant paper")
 
     assert result == {
-        "status": "added_to_review",
+        "status": "queued_for_enrichment",
         "round_index": 0,
         "collection_added": True,
-        "audit_total": 2,
+        "pending": 1,
     }
+    _, rows = read_csv(audit_path)
+    assert [row["title"] for row in rows] == ["Automatically Found"]
+    assert service.manual_enrichment_status(project.slug, 0) == {
+        "saved": 1,
+        "pending": 1,
+        "enriched": 0,
+    }
+
+    service.enrich_manual_additions(
+        project.slug,
+        0,
+        enrich_limit=0,
+        core_online=False,
+    )
+
     _, rows = read_csv(audit_path)
     assert [row["title"] for row in rows] == [
         "Automatically Found",
@@ -187,6 +202,7 @@ def test_manual_paper_enters_existing_review_and_updates_flow(tmp_path: Path) ->
     ]
     assert rows[1]["manual_added"] == "True"
     assert rows[1]["manual_review_added"] == "true"
+    assert rows[1]["manual_enrichment_status"] == "completed"
     assert rows[1]["manual_notes"] == "Known relevant paper"
 
     updated = service.load_current_state(project.slug)
@@ -199,21 +215,33 @@ def test_manual_paper_enters_existing_review_and_updates_flow(tmp_path: Path) ->
     assert "corpus_analysis" not in updated
     assert [stage["key"] for stage in updated_round["flow"]] == [
         "audit_queue",
-        "manual_review_additions",
         "human_audit",
+        "manual_loop_additions",
+        "manual_venue_enrichment",
+        "manual_abstract_enrichment",
+        "manual_return_to_review",
     ]
-    assert updated_round["flow"][1]["retained"] == 2
+    assert updated_round["flow"][-1]["loop_to"] == "human_audit"
+    assert updated_round["flow"][2]["retained"] == 1
 
     second = create_manual_record(
         title="A Second Manual Paper",
         year=2023,
         doi="10.1000/manual-review-2",
     )
-    assert service.add_manual_paper(project.slug, second)["status"] == "added_to_review"
-    manual_stage = service.load_current_state(project.slug)["rounds"][0]["flow"][1]
-    assert manual_stage["input"] == 1
-    assert manual_stage["retained"] == 3
-    assert manual_stage["details"]["added by researcher"] == 2
+    assert service.add_manual_paper(project.slug, second)["status"] == (
+        "queued_for_enrichment"
+    )
+    service.enrich_manual_additions(
+        project.slug,
+        0,
+        enrich_limit=0,
+        core_online=False,
+    )
+    manual_stage = service.load_current_state(project.slug)["rounds"][0]["flow"][2]
+    assert manual_stage["input"] == 2
+    assert manual_stage["retained"] == 2
+    assert manual_stage["details"]["submitted"] == 2
 
     duplicate = service.add_manual_paper(project.slug, manual, "Duplicate attempt")
     assert duplicate["status"] == "already_in_review"
@@ -235,10 +263,31 @@ def test_manual_paper_enters_existing_review_and_updates_flow(tmp_path: Path) ->
     assert after_removal["progress"]["paper_count"] == 2
     assert after_removal_round["counts"]["audit_queue"] == 2
     assert after_removal_round["counts"]["manual_review_additions"] == 1
-    assert after_removal_round["flow"][1]["retained"] == 2
+    assert after_removal_round["flow"][2]["retained"] == 1
+
+    pending = create_manual_record(
+        title="Pending Manual Paper",
+        year=2022,
+        doi="10.1000/manual-pending",
+    )
+    service.add_manual_paper(project.slug, pending)
+    assert service.load_current_state(project.slug)["rounds"][0]["counts"][
+        "manual_pending"
+    ] == 1
+    pending_removal = service.remove_manual_paper(project.slug, pending)
+    assert pending_removal == {
+        "status": "removed_from_collection",
+        "collection_removed": True,
+        "review_rows_removed": 0,
+    }
+    assert service.load_current_state(project.slug)["rounds"][0]["counts"][
+        "manual_pending"
+    ] == 0
 
 
-def test_saved_manual_papers_are_reconciled_into_an_existing_review(tmp_path: Path) -> None:
+def test_legacy_direct_manual_paper_enters_enrichment_loop_without_duplication(
+    tmp_path: Path,
+) -> None:
     store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
     project = store.create_project(
         name="Legacy Manual Paper",
@@ -260,8 +309,25 @@ def test_saved_manual_papers_are_reconciled_into_an_existing_review(tmp_path: Pa
     audit_path = store.project_dir(project.slug) / "audits" / run_id / "round_0.csv"
     write_audit_csv(
         audit_path,
-        [{"title": "Existing", "year": "2025", "manual_decision": ""}],
-        ["title", "year", "manual_decision"],
+        [
+            {"title": "Existing", "year": "2025", "manual_decision": ""},
+            {
+                "title": "Saved Before Live Review",
+                "year": "2024",
+                "doi": "10.1000/legacy-manual",
+                "manual_review_added": "true",
+                "manual_decision": "",
+                "manual_notes": "Known paper",
+            },
+        ],
+        [
+            "title",
+            "year",
+            "doi",
+            "manual_review_added",
+            "manual_decision",
+            "manual_notes",
+        ],
     )
     store.set_current_run(project.slug, run_id)
     service._save_state(
@@ -280,7 +346,7 @@ def test_saved_manual_papers_are_reconciled_into_an_existing_review(tmp_path: Pa
                     "status": "ready_for_review",
                     "created_at": "2026-01-01T00:00:00",
                     "files": {"audit": str(audit_path)},
-                    "counts": {"audit_queue": 1},
+                    "counts": {"audit_queue": 2},
                     "flow": [],
                     "error": "",
                 }
@@ -288,12 +354,19 @@ def test_saved_manual_papers_are_reconciled_into_an_existing_review(tmp_path: Pa
         },
     )
 
-    first = service.reconcile_saved_manual_papers(project.slug, 0)
-    second = service.reconcile_saved_manual_papers(project.slug, 0)
+    before = service.manual_enrichment_status(project.slug, 0)
+    service.enrich_manual_additions(
+        project.slug,
+        0,
+        enrich_limit=0,
+        core_online=False,
+    )
+    after = service.manual_enrichment_status(project.slug, 0)
 
-    assert first == {"added": 1, "already_present": 0}
-    assert second == {"added": 0, "already_present": 1}
+    assert before == {"saved": 1, "pending": 1, "enriched": 0}
+    assert after == {"saved": 1, "pending": 0, "enriched": 1}
     assert [row["title"] for row in read_csv(audit_path)[1]] == [
         "Existing",
         "Saved Before Live Review",
     ]
+    assert read_csv(audit_path)[1][1]["manual_enrichment_status"] == "completed"

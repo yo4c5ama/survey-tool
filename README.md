@@ -23,8 +23,11 @@ flowchart TD
     F -- Yes --> G["Generate AI recommendations<br/>from titles and abstracts"]
     F -- No --> H["Create a human-only review queue"]
     G --> H
-    P -- "After a review queue exists" --> H
     H --> I["Human audit<br/>Include, related, exclude, or review later"]
+    I -- "Add known papers" --> Q["Queue researcher additions"]
+    Q --> V["Enrich venue type, rank, and IF"]
+    V --> W["Enrich missing abstracts"]
+    W -- "Return enriched papers" --> H
     I --> J{"Run citation snowballing?"}
     J -- Yes --> K["Collect references and citing works<br/>from included and related papers"]
     K --> C
@@ -288,19 +291,20 @@ retrieval missed.
 3. If no match exists, enter title, semicolon-separated authors, year (`0` if
    unknown), venue, publication type, DOI, URL, and an addition note.
 4. Before the first review queue exists, select **Synchronize manual papers** to
-   run the additions through the normal enrichment pipeline. After a review queue
-   exists, a new paper is deduplicated and appended directly to the selected
-   audit round; review counts and the literature flow update immediately.
-5. Removing a directly added paper also removes it from Manual Review and updates
-   the saved counts and flow. Automatically discovered matches are preserved.
+   run additions through the initial pipeline. After a review queue exists, the
+   paper first enters a pending manual-enrichment queue.
+5. Select **Start enrichment and add to review**. The app bypasses discovery and
+   screening, enriches venue type/rank/IF and missing abstracts, then returns the
+   paper to the selected Manual Review round.
+6. Removing an enriched manual paper also removes it from Manual Review and
+   updates the saved counts and loop. Automatically discovered matches remain.
 
-When an older project is opened, saved manual papers that predate live insertion
-are reconciled into the selected review round once, without creating duplicates.
+Older direct additions that have not been enriched are recognized as pending and
+can enter the same loop without being added again.
 
 Every manual paper is normalized and deduplicated. If no run exists, it enters
-the next initial discovery automatically. If the current initial review queue
-already exists, start a new initial run instead of rewriting completed audit
-history.
+the next initial discovery automatically. If a review queue exists, use the
+manual enrichment start button; a new initial run is not required.
 
 #### 3.6 Manual Review
 
@@ -514,7 +518,7 @@ corpus together when archiving or publishing a review.
 | A stopped run begins discovery again | Use **Resume run** in Current run. **Start a new initial run** intentionally creates another run from the first stage. |
 | The current run disappears after changing pages | Return to Run Center for the full live panel. The sidebar also shows the selected project's saved status. Ensure the same project is selected. |
 | OpenAI says no key is available | Enter the key on AI settings and select **Apply API key**. Putting it in a research YAML file is intentionally unsupported. |
-| A known paper is missing | Use the Add papers section at the bottom of Manual Review. Before a queue exists, synchronize it; after a queue exists, it enters the selected round immediately. |
+| A known paper is missing | Use Add papers at the bottom of Manual Review. After saving it, select **Start enrichment and add to review** so venue and abstract metadata are completed before it enters the selected round. |
 | Rank or Impact Factor is blank | The venue could not be matched to the available ranking metadata. Treat it as unknown and verify it manually if required. |
 
 ### 7. Repository Map
@@ -681,10 +685,11 @@ prompt 与成本，再将 `0` 用于全部论文。也可以完全关闭 AI，�
 确认匹配项；找不到时再手工填写 title、分号分隔的 authors、year（未知填 `0`）、venue、
 publication type、DOI、URL 和 addition note。补录记录也会标准化和去重。
 
-首次审阅队列建立前点击 **Synchronize manual papers**，让补录论文经过正常的元数据和摘要流程。
-审阅队列建立后，新增论文会在去重后直接加入当前选择的审阅轮次，并立即更新候选数和流程图，
-无需重新运行 initial discovery。删除直接补录的论文时，审阅表、计数和流程图也会同步更新；
-自动检索到的相同论文不会被删除。添加入口位于**人工审阅**页面最下方。
+首次审阅队列建立前点击 **Synchronize manual papers**，让补录论文经过初始流程。审阅队列建立后，
+新增论文先进入待 enrichment 清单；点击 **启动 enrichment 并加入审阅** 后，它会跳过 discovery 和
+screening，直接补全 venue 类型、rank/IF 和摘要，再返回当前审阅轮次。流程图会显示
+“人工审阅 -> 人工补录 -> enrichment -> 人工审阅”的循环。删除已处理补录论文时，审阅表、计数和
+循环也会同步更新；自动检索到的相同论文不会被删除。添加入口位于**人工审阅**页面最下方。
 
 #### 3.6 人工审阅
 
@@ -832,7 +837,9 @@ Query / Abstract limit の `0` は全件を意味し、小さい値はテスト�
 既知タイトルをデータソースで検索して一致を確認するか、title、authors、year、venue、type、DOI、
 URL、追加理由を手入力します。重複は統合されます。最初の review queue を作る前は
 **Synchronize manual papers** を実行します。review queue 作成後は、論文が選択中の audit round へ
-直接追加され、件数と文献フローが直ちに更新されます。フォームは Manual review の末尾にあります。
+直接は追加されず、enrichment 待ちになります。**Start enrichment and add to review** を押すと、
+venue type、rank/IF、欠落抄録を補完して選択中の audit round に戻り、文献フローには Manual review
+から enrichment を経て戻るループが表示されます。フォームは Manual review の末尾にあります。
 
 #### 3.6 Manual review
 
@@ -943,7 +950,9 @@ Query / Abstract limit의 `0`은 전체를 의미하고 작은 값은 테스트�
 알고 있는 제목을 선택한 소스에서 찾아 올바른 메타데이터를 확인하거나 title, authors, year, venue,
 publication type, DOI, URL과 추가 이유를 직접 입력합니다. 기록은 중복 제거됩니다. 첫 review queue를
 만들기 전에는 **Synchronize manual papers**를 누릅니다. queue가 만들어진 뒤에는 선택한 audit round에
-논문이 즉시 추가되고 수와 문헌 흐름도 갱신됩니다. 추가 양식은 Manual review 맨 아래에 있습니다.
+바로 추가되지 않고 enrichment 대기 상태가 됩니다. **Start enrichment and add to review**를 누르면
+venue type, rank/IF와 누락 초록을 보강한 뒤 선택한 audit round로 돌아갑니다. 문헌 흐름에는 Manual
+review에서 enrichment를 거쳐 다시 돌아오는 순환이 표시됩니다. 추가 양식은 Manual review 맨 아래에 있습니다.
 
 #### 3.6 Manual review
 

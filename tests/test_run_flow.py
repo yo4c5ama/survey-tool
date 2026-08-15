@@ -26,3 +26,30 @@ def test_flow_stages_are_replaced_by_key_and_exported() -> None:
     assert svg.startswith("<svg")
     assert "Deduplication" in svg
     assert "25 excluded" in svg
+
+
+def test_flow_svg_draws_manual_enrichment_loop() -> None:
+    round_state = {"index": 0, "kind": "initial", "status": "ready", "flow": []}
+    record_flow_stage(
+        round_state,
+        key="human_audit",
+        label="Human audit",
+        input_count=10,
+        retained_count=8,
+        stage_type="review",
+    )
+    record_flow_stage(
+        round_state,
+        key="manual_return_to_review",
+        label="Return to review",
+        input_count=2,
+        retained_count=2,
+        stage_type="review",
+        loop_to="human_audit",
+    )
+    state = {"run_id": "run-loop", "status": "ready", "rounds": [round_state]}
+
+    assert round_state["flow"][1]["loop_to"] == "human_audit"
+    svg = build_flow_svg(state)
+    assert "manual enrichment loop" in svg
+    assert 'stroke-dasharray="5 3"' in svg
