@@ -32,6 +32,7 @@ data/raw/
 data/processed/
 data/runs/
 data/exports/
+data/backups/
 
 # Downloaded reference papers are not application source
 ref/

@@ -17,13 +17,16 @@ from rich.console import Console
 
 from vnn_survey.ai_research import CorpusAnalyzer, OpenAIResearchClient, load_csv_rows
 from vnn_survey.app.audit import (
+    AuditSummary,
     build_cumulative_audit,
     create_audit_queue,
     create_manual_recommendations,
     load_audit,
     read_csv,
+    summarize_audit,
     update_audit_rows,
 )
+from vnn_survey.app.audit import write_csv as write_audit_csv
 from vnn_survey.app.manual_papers import ManualPaperStore
 from vnn_survey.app.project_store import ProjectStore
 from vnn_survey.app.run_flow import build_flow_svg, flow_summary_payload, record_flow_stage
@@ -1548,24 +1551,222 @@ class PipelineService:
         state = self.load_current_state(project_slug)
         round_state = _get_round(state, round_index)
         summary = update_audit_rows(Path(round_state["files"]["audit"]), updates)
-        round_state["counts"]["reviewed"] = summary.reviewed
-        round_state["counts"]["unreviewed"] = summary.unreviewed
-        included = (
-            summary.by_decision.get("include", 0)
-            + summary.by_decision.get("include_related", 0)
-        )
-        record_flow_stage(
-            round_state,
-            key="human_audit",
-            label="Human audit",
-            input_count=summary.total,
-            retained_count=included,
-            excluded_count=summary.by_decision.get("exclude", 0),
-            stage_type="review",
-            details={"pending": summary.unreviewed},
-        )
+        _apply_audit_summary(round_state, summary)
+        _invalidate_derived_outputs(state)
         self._save_state(project_slug, state)
         return summary
+
+    def add_manual_paper(
+        self,
+        project_slug: str,
+        record: PaperRecord,
+        note: str = "",
+        *,
+        round_index: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist a known paper and append it to an active audit queue when possible."""
+
+        manual_store = ManualPaperStore(self.store.project_dir(project_slug))
+        saved, collection_added = manual_store.add(record, note)
+        state = self.current_state_or_none(project_slug)
+        if state is None:
+            return {
+                "status": "saved_for_discovery",
+                "collection_added": collection_added,
+            }
+
+        audit_rounds = [
+            item for item in state.get("rounds", []) if item.get("files", {}).get("audit")
+        ]
+        if not audit_rounds:
+            return {
+                "status": "saved_for_discovery",
+                "collection_added": collection_added,
+            }
+
+        for item in audit_rounds:
+            _, existing_rows = read_csv(Path(item["files"]["audit"]))
+            if any(_audit_row_matches_record(row, saved) for row in existing_rows):
+                return {
+                    "status": "already_in_review",
+                    "round_index": int(item["index"]),
+                    "collection_added": collection_added,
+                }
+
+        if round_index is None:
+            target_round = audit_rounds[-1]
+        else:
+            target_round = next(
+                (item for item in audit_rounds if int(item["index"]) == round_index),
+                None,
+            )
+            if target_round is None:
+                raise RuntimeError(f"Review round {round_index} is not available.")
+
+        audit_path = Path(target_round["files"]["audit"])
+        fieldnames, rows = read_csv(audit_path)
+        prepared = _manual_audit_row(saved, note)
+        output_fields = list(dict.fromkeys([*fieldnames, *prepared]))
+        rows.append(prepared)
+        write_audit_csv(audit_path, rows, output_fields)
+
+        summary = summarize_audit(rows)
+        target_round["counts"]["audit_queue"] = summary.total
+        target_round["counts"]["manual_records"] = len(manual_store.load())
+        target_round["counts"]["manual_review_additions"] = (
+            int(target_round["counts"].get("manual_review_additions") or 0) + 1
+        )
+        direct_additions = target_round["counts"]["manual_review_additions"]
+        record_flow_stage(
+            target_round,
+            key="manual_review_additions",
+            label="Manual review additions",
+            input_count=max(summary.total - direct_additions, 0),
+            retained_count=summary.total,
+            excluded_count=0,
+            stage_type="discovery",
+            details={"added by researcher": direct_additions},
+        )
+        _move_flow_stage_before(
+            target_round,
+            "manual_review_additions",
+            {"human_audit", "final_corpus"},
+        )
+        _apply_audit_summary(target_round, summary)
+        target_round["status"] = "ready_for_review"
+        state["status"] = "awaiting_manual_review"
+        progress_count = state.get("progress", {}).get("paper_count")
+        _set_progress_paper_count(
+            state,
+            int(progress_count) + 1
+            if progress_count not in (None, "")
+            else summary.total,
+        )
+        _invalidate_derived_outputs(state)
+        self._save_state(project_slug, state)
+        return {
+            "status": "added_to_review",
+            "round_index": int(target_round["index"]),
+            "collection_added": collection_added,
+            "audit_total": summary.total,
+        }
+
+    def remove_manual_paper(
+        self,
+        project_slug: str,
+        record: PaperRecord,
+    ) -> dict[str, Any]:
+        """Remove a saved paper and any audit row created by direct manual addition."""
+
+        manual_store = ManualPaperStore(self.store.project_dir(project_slug))
+        collection_removed = manual_store.remove(record.dedupe_key())
+        state = self.current_state_or_none(project_slug)
+        if state is None:
+            return {
+                "status": "removed_from_collection",
+                "collection_removed": collection_removed,
+                "review_rows_removed": 0,
+            }
+
+        review_rows_removed = 0
+        for round_state in state.get("rounds", []):
+            audit_value = round_state.get("files", {}).get("audit")
+            if not audit_value:
+                continue
+            audit_path = Path(audit_value)
+            fieldnames, rows = read_csv(audit_path)
+            retained = [
+                row
+                for row in rows
+                if not (
+                    _is_direct_manual_audit_row(row)
+                    and _audit_row_matches_record(row, record)
+                )
+            ]
+            removed_here = len(rows) - len(retained)
+            if not removed_here:
+                continue
+
+            review_rows_removed += removed_here
+            write_audit_csv(audit_path, retained, fieldnames)
+            summary = summarize_audit(retained)
+            round_state["counts"]["audit_queue"] = summary.total
+            round_state["counts"]["manual_records"] = len(manual_store.load())
+            direct_additions = max(
+                int(round_state["counts"].get("manual_review_additions") or 0)
+                - removed_here,
+                0,
+            )
+            round_state["counts"]["manual_review_additions"] = direct_additions
+            if direct_additions:
+                record_flow_stage(
+                    round_state,
+                    key="manual_review_additions",
+                    label="Manual review additions",
+                    input_count=max(summary.total - direct_additions, 0),
+                    retained_count=summary.total,
+                    excluded_count=0,
+                    stage_type="discovery",
+                    details={"added by researcher": direct_additions},
+                )
+                _move_flow_stage_before(
+                    round_state,
+                    "manual_review_additions",
+                    {"human_audit", "final_corpus"},
+                )
+            else:
+                round_state["flow"] = [
+                    stage
+                    for stage in round_state.get("flow", [])
+                    if stage.get("key") != "manual_review_additions"
+                ]
+            _apply_audit_summary(round_state, summary)
+
+        if review_rows_removed:
+            progress_count = state.get("progress", {}).get("paper_count")
+            if progress_count not in (None, ""):
+                _set_progress_paper_count(
+                    state,
+                    max(int(progress_count) - review_rows_removed, 0),
+                )
+            _invalidate_derived_outputs(state)
+            self._save_state(project_slug, state)
+
+        return {
+            "status": (
+                "removed_from_review"
+                if review_rows_removed
+                else "removed_from_collection"
+            ),
+            "collection_removed": collection_removed,
+            "review_rows_removed": review_rows_removed,
+        }
+
+    def reconcile_saved_manual_papers(
+        self,
+        project_slug: str,
+        round_index: int,
+    ) -> dict[str, int]:
+        """Backfill saved manual records created before live review insertion existed."""
+
+        manual_store = ManualPaperStore(self.store.project_dir(project_slug))
+        added = 0
+        already_present = 0
+        for record in manual_store.load():
+            result = self.add_manual_paper(
+                project_slug,
+                record,
+                record.manual_note or "",
+                round_index=round_index,
+            )
+            if result["status"] == "added_to_review":
+                added += 1
+            elif result["status"] == "already_in_review":
+                already_present += 1
+        return {
+            "added": added,
+            "already_present": already_present,
+        }
 
     def generate_exports(self, project_slug: str) -> dict[str, Path]:
         state = self.load_current_state(project_slug)
@@ -1917,6 +2118,92 @@ def list_openai_models(
         }
     )
     return model_ids, "Connection succeeded."
+
+
+def _manual_audit_row(record: PaperRecord, note: str) -> dict[str, str]:
+    row = {
+        str(key): "" if value is None else str(value)
+        for key, value in record.to_row().items()
+    }
+    row.update(
+        {
+            "auto_screening_decision": "needs_review",
+            "auto_screening_reason": "Added directly by the researcher.",
+            "final_recommendation": "manual_review",
+            "final_priority": "1",
+            "final_reason": "Added directly by the researcher for human review.",
+            "manual_decision": "",
+            "manual_notes": note.strip(),
+            "manual_review_added": "true",
+        }
+    )
+    return row
+
+
+def _audit_row_matches_record(row: dict[str, str], record: PaperRecord) -> bool:
+    try:
+        existing = PaperRecord.from_dict(row)
+    except (TypeError, ValueError):
+        return False
+    return len(dedupe_records([existing, record])) == 1
+
+
+def _is_direct_manual_audit_row(row: dict[str, str]) -> bool:
+    marker = (row.get("manual_review_added") or "").strip().lower()
+    if marker in {"true", "1", "yes"}:
+        return True
+    return row.get("final_reason") == "Added directly by the researcher for human review."
+
+
+def _apply_audit_summary(
+    round_state: dict[str, Any],
+    summary: AuditSummary,
+) -> None:
+    round_state["counts"]["reviewed"] = summary.reviewed
+    round_state["counts"]["unreviewed"] = summary.unreviewed
+    included = (
+        summary.by_decision.get("include", 0)
+        + summary.by_decision.get("include_related", 0)
+    )
+    record_flow_stage(
+        round_state,
+        key="human_audit",
+        label="Human audit",
+        input_count=summary.total,
+        retained_count=included,
+        excluded_count=summary.by_decision.get("exclude", 0),
+        stage_type="review",
+        details={"pending": summary.unreviewed},
+    )
+
+
+def _move_flow_stage_before(
+    round_state: dict[str, Any],
+    key: str,
+    before_keys: set[str],
+) -> None:
+    stages = round_state.get("flow", [])
+    stage = next((item for item in stages if item.get("key") == key), None)
+    if stage is None:
+        return
+    retained = [item for item in stages if item.get("key") != key]
+    insert_at = next(
+        (index for index, item in enumerate(retained) if item.get("key") in before_keys),
+        len(retained),
+    )
+    retained.insert(insert_at, stage)
+    round_state["flow"] = retained
+
+
+def _invalidate_derived_outputs(state: dict[str, Any]) -> None:
+    state.pop("exports", None)
+    state.pop("corpus_analysis", None)
+    for round_state in state.get("rounds", []):
+        round_state["flow"] = [
+            stage
+            for stage in round_state.get("flow", [])
+            if stage.get("key") != "final_corpus"
+        ]
 
 
 def _new_round_state(index: int, kind: str) -> dict[str, Any]:

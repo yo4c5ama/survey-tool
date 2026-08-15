@@ -13,7 +13,7 @@ snowballing, final export, PDF question answering, and corpus classification.
 flowchart TD
     A["Define the research scope<br/>Question, years, keywords, criteria, and sources"] --> B["Search selected literature sources"]
     B --> C["Normalize and deduplicate records"]
-    P["Add known papers manually"] --> C
+    P["Add known papers manually"] -- "Before a review queue exists" --> C
     C --> E["Apply rule-based title exclusions"]
     E --> T{"Use batched AI title prescreen?"}
     T -- Yes --> U["Keep relevant or ambiguous titles<br/>Cache every title decision"]
@@ -23,6 +23,7 @@ flowchart TD
     F -- Yes --> G["Generate AI recommendations<br/>from titles and abstracts"]
     F -- No --> H["Create a human-only review queue"]
     G --> H
+    P -- "After a review queue exists" --> H
     H --> I["Human audit<br/>Include, related, exclude, or review later"]
     I --> J{"Run citation snowballing?"}
     J -- Yes --> K["Collect references and citing works<br/>from included and related papers"]
@@ -77,8 +78,9 @@ copy of `uv`, Python, and the required packages inside the SurveyFlow folder.
 Nothing is installed globally. Internet access is required during the first
 start and while using online literature or AI services.
 
-To stop the application itself, return to the launcher terminal and press
-`Ctrl+C`. On Windows, closing the launcher window also stops it.
+To stop the application itself, close the launcher terminal or command window.
+SurveyFlow disables Streamlit's developer shortcuts, so normal browser copy and
+paste are not intercepted by cache or rerun commands.
 
 #### Start from the source repository
 
@@ -105,9 +107,23 @@ docker compose down
 
 ### 3. Workspace Guide
 
-The sidebar selects the interface language, active project, and one of the eight
+The sidebar selects the interface language, active project, and one of the seven
 workspace pages. Each project has an independent scope, credentials, run
 history, review decisions, PDFs, and AI analysis files.
+
+#### Backup and restore
+
+Open **Backup and restore** in the sidebar. **Create backup** packages every
+project, run checkpoint, audit, export, uploaded PDF, saved conversation, and
+corpus analysis into one versioned ZIP. Rebuildable API caches are excluded by
+default. Saved API keys are also excluded unless **Include saved API keys** is
+explicitly enabled; a ZIP containing keys must be treated as private.
+
+In a fresh or updated installation, upload that ZIP under **Import SurveyFlow
+backup**. Existing projects are skipped by default. Choose replacement only
+when the backup should become authoritative and confirm the warning. Import
+validates the archive and rewrites machine-specific paths so runs and PDFs work
+from their new location. Stop all active project tasks before either operation.
 
 #### 3.1 Scope
 
@@ -262,15 +278,24 @@ usage. Enable **Use AI abstract screening** to receive title-and-abstract
 recommendations, or create a human-only queue. **AI paper limit = 0** means all
 eligible papers; use a small number to test the prompt and cost first.
 
-#### 3.5 Add Papers
+#### 3.5 Add Papers inside Manual Review
 
-Use this page for known papers that automatic retrieval missed.
+Use the section at the bottom of Manual Review for known papers that automatic
+retrieval missed.
 
 1. Search the full or approximate title in selected sources.
 2. Confirm the correct metadata match and record why it was added.
 3. If no match exists, enter title, semicolon-separated authors, year (`0` if
    unknown), venue, publication type, DOI, URL, and an addition note.
-4. Select **Synchronize manual papers** before creating the first review queue.
+4. Before the first review queue exists, select **Synchronize manual papers** to
+   run the additions through the normal enrichment pipeline. After a review queue
+   exists, a new paper is deduplicated and appended directly to the selected
+   audit round; review counts and the literature flow update immediately.
+5. Removing a directly added paper also removes it from Manual Review and updates
+   the saved counts and flow. Automatically discovered matches are preserved.
+
+When an older project is opened, saved manual papers that predate live insertion
+are reconciled into the selected review round once, without creating duplicates.
 
 Every manual paper is normalized and deduplicated. If no run exists, it enters
 the next initial discovery automatically. If the current initial review queue
@@ -292,8 +317,11 @@ Manual review is the authoritative selection stage.
 - Use **Later** only as a temporary marker; a round cannot seed the next
   snowballing round until every paper has a final manual decision.
 
-Save decisions frequently. The audit CSV can be downloaded at any time. The
-paper reader below the table provides a larger abstract and AI-evidence view.
+Decisions and reviewer notes are saved automatically whenever a cell edit is
+committed. Counts and the human-audit flow stage refresh immediately. The audit
+CSV can be downloaded at any time, and the paper reader below the table provides
+a larger abstract and AI-evidence view. Any audit change invalidates older final
+exports so Results cannot silently display a stale corpus.
 
 #### 3.7 Snowball
 
@@ -464,6 +492,13 @@ analysis artifacts. API keys are stored separately under
 `.secrets/app_projects/`. Both locations persist across normal app restarts and
 Docker rebuilds when the supplied volume configuration is used.
 
+For a manual upgrade, retaining `data/` and `.secrets/` is sufficient for the
+app workspace: the quick-start package provides the source code, built-in source
+profiles, and venue tables again. The safer upgrade path is to download a backup,
+install the new release, and import it. Local backup ZIPs are also retained under
+`data/backups/`, but the downloaded copy should be kept outside the application
+folder before replacing or deleting that folder.
+
 Starting a new run does not delete an older run. The project points to the newest
 current run while previous timestamped folders remain available on disk. Keep
 the scope, generated queries, flow-count JSON, complete audit CSV, and final
@@ -479,7 +514,7 @@ corpus together when archiving or publishing a review.
 | A stopped run begins discovery again | Use **Resume run** in Current run. **Start a new initial run** intentionally creates another run from the first stage. |
 | The current run disappears after changing pages | Return to Run Center for the full live panel. The sidebar also shows the selected project's saved status. Ensure the same project is selected. |
 | OpenAI says no key is available | Enter the key on AI settings and select **Apply API key**. Putting it in a research YAML file is intentionally unsupported. |
-| A known paper is missing | Search it on Add Papers or create a manual record, then synchronize before the review queue is created. |
+| A known paper is missing | Use the Add papers section at the bottom of Manual Review. Before a queue exists, synchronize it; after a queue exists, it enters the selected round immediately. |
 | Rank or Impact Factor is blank | The venue could not be matched to the available ranking metadata. Treat it as unknown and verify it manually if required. |
 
 ### 7. Repository Map
@@ -541,7 +576,8 @@ sh start.sh
 浏览器打开 <http://localhost:8501>。首次启动时脚本会在 SurveyFlow 目录内安装独立的
 `uv`、Python 和依赖，不会修改系统 Python。首次安装、在线检索和 AI 功能需要联网。
 
-停止应用时回到启动终端按 `Ctrl+C`；Windows 也可以关闭启动窗口。已经安装 `uv` 的
+停止应用时直接关闭启动终端或命令窗口。SurveyFlow 已关闭 Streamlit 的开发者快捷操作，
+浏览器中的复制粘贴不会再触发清除缓存或重新运行。已经安装 `uv` 的
 开发者可以运行：
 
 ```bash
@@ -552,6 +588,12 @@ uv run vnn-survey-app
 使用 Docker 时运行 `docker compose up --build`，停止时运行 `docker compose down`。
 
 ### 3. 各页面功能
+
+侧栏的 **备份与恢复** 可以把全部项目、运行 checkpoint、审阅表、导出结果、PDF、对话和
+文献集分析打包为一个带版本信息的 ZIP。默认不包含可重建的 API 缓存，也不包含密钥；只有明确
+勾选 **包含已保存的 API 密钥** 时才会写入密钥，此类 ZIP 必须私密保存。新版本中上传该 ZIP
+即可恢复。遇到同名项目默认跳过，只有选择替换并确认后才覆盖。导入时会验证压缩包并重写旧电脑
+的绝对路径。导入或导出前应先停止所有运行任务。
 
 #### 3.1 研究范围（Scope）
 
@@ -633,14 +675,16 @@ Literature flow 会记录每一步的输入、排除和保留数量，并可下�
 检索完成后，平台先估算摘要级 AI 的论文数和 token。建议先用小的 AI paper limit 检查
 prompt 与成本，再将 `0` 用于全部论文。也可以完全关闭 AI，创建纯人工队列。
 
-#### 3.5 添加论文
+#### 3.5 人工审阅中的添加论文
 
-这一页用于加入数据库漏掉但研究者已知的文章。优先输入完整或近似标题，在选择的数据源中
+使用人工审阅页面底部的添加区域，加入数据库漏掉但研究者已知的文章。优先输入完整或近似标题，在选择的数据源中
 确认匹配项；找不到时再手工填写 title、分号分隔的 authors、year（未知填 `0`）、venue、
 publication type、DOI、URL 和 addition note。补录记录也会标准化和去重。
 
-首次审阅队列建立前点击 **Synchronize manual papers**。如果审阅队列已经存在，平台不会
-重写审计历史，应新建一次 initial run 来纳入后来补充的论文。
+首次审阅队列建立前点击 **Synchronize manual papers**，让补录论文经过正常的元数据和摘要流程。
+审阅队列建立后，新增论文会在去重后直接加入当前选择的审阅轮次，并立即更新候选数和流程图，
+无需重新运行 initial discovery。删除直接补录的论文时，审阅表、计数和流程图也会同步更新；
+自动检索到的相同论文不会被删除。添加入口位于**人工审阅**页面最下方。
 
 #### 3.6 人工审阅
 
@@ -654,7 +698,9 @@ Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank�
 - **Exclude**：不符合范围，建议写下对应的排除理由。
 - **Later**：暂时无法判断，不能作为一轮完成时的最终状态。
 
-每轮所有论文都需要人工最终决定，之后才能继续滚雪球。应经常保存，并保留可下载的 audit CSV。
+人工决定和备注会在单元格编辑确认后自动保存，统计数字与 Human audit 流程节点同步刷新。
+每轮所有论文都需要人工最终决定，之后才能继续滚雪球。任何审阅变化都会使旧的最终导出失效，
+避免结果页继续显示过期文献集；audit CSV 可随时下载。
 
 #### 3.7 滚雪球
 
@@ -695,9 +741,13 @@ AI 结论必须回到原文核查。运行 AI 时，所需文本或 PDF 会发�
 `data/app_projects/`；密钥单独保存在 `.secrets/app_projects/`。正常重启和按提供配置重建
 Docker 不会清除它们。新运行也不会删除旧运行，只会成为该项目当前显示的 run。
 
+手动更新版本时，只保留 `data/` 与 `.secrets/` 就能保留应用工作；源码、内置数据源配置和
+venue 表会由新版本重新提供。更稳妥的方式是在旧版本侧栏下载备份，在新版本中导入。应用生成的
+备份也保存在 `data/backups/`，但在删除整个旧目录前，应把下载的 ZIP 另存到目录之外。
+
 遇到大量无关论文时，先检查关键词是否正确分成“组内 OR、组间 AND”，再启用标题 AI 预筛；
 不要用大量宽泛标题排除词代替正确查询。摘要慢时查看 429 和等待统计，配置多个 fallback、
-必要密钥与联系邮箱，并先小批测试。已知论文缺失时使用**添加论文**，不要为了单篇遗漏不断
+必要密钥与联系邮箱，并先小批测试。已知论文缺失时使用**人工审阅**底部的添加区域，不要为了单篇遗漏不断
 放宽全部关键词。
 
 ---
@@ -727,11 +777,18 @@ sh start.sh
 ```
 
 <http://localhost:8501> を開きます。初回はフォルダー内に専用の `uv`、Python、依存関係を
-自動で導入し、システム Python は変更しません。終了するには起動ターミナルで `Ctrl+C` を
-押します。`uv` がある場合は `uv sync --no-dev`、`uv run vnn-survey-app` でも起動できます。
+自動で導入し、システム Python は変更しません。終了するには起動ターミナルまたはコマンド
+ウィンドウを閉じます。Streamlit の開発者ショートカットは無効で、ブラウザーのコピー操作を
+妨げません。`uv` がある場合は `uv sync --no-dev`、`uv run vnn-survey-app` でも起動できます。
 Docker の場合は `docker compose up --build`、終了は `docker compose down` です。
 
 ### 3. 各ページ
+
+サイドバーの **Backup and restore** は、全プロジェクト、実行 checkpoint、監査、出力、PDF、
+会話、分析を 1 つのバージョン付き ZIP にまとめます。再構築可能な API cache と API key は
+既定で除外されます。key を含める場合、その ZIP は非公開で保管してください。新しい版では ZIP
+をアップロードして復元できます。同名プロジェクトは既定でスキップされ、明示的に確認した場合
+のみ置換されます。導入時には旧環境の絶対パスも新しい場所へ変換されます。
 
 #### 3.1 Scope
 
@@ -746,7 +803,7 @@ Docker の場合は `docker compose up --build`、終了は `docker compose down
 DBLP はコンピューターサイエンス、OpenAlex は学際検索と引用、Crossref は DOI メタデータ、
 arXiv は定量分野のプレプリント、PubMed は生物医学に適しています。単一データベースは完全では
 ありません。OpenAIRE と Europeana は計画中で、現在ライブ検索できません。既知の欠落資料は
-Add papers から補います。
+Manual review 末尾の Add papers から補います。
 
 #### 3.3 AI settings
 
@@ -770,18 +827,20 @@ Query / Abstract limit の `0` は全件を意味し、小さい値はテスト�
 **Resume run** は最新 checkpoint から再開します。**Start a new initial run** は旧ファイルを
 残したまま別の run を最初から作成する操作です。
 
-#### 3.5 Add papers
+#### 3.5 Manual review 内の Add papers
 
 既知タイトルをデータソースで検索して一致を確認するか、title、authors、year、venue、type、DOI、
-URL、追加理由を手入力します。重複は統合されます。最初の review queue を作る前に
-**Synchronize manual papers** を実行してください。既に audit がある場合は履歴を守るため新しい
-initial run を作ります。
+URL、追加理由を手入力します。重複は統合されます。最初の review queue を作る前は
+**Synchronize manual papers** を実行します。review queue 作成後は、論文が選択中の audit round へ
+直接追加され、件数と文献フローが直ちに更新されます。フォームは Manual review の末尾にあります。
 
 #### 3.6 Manual review
 
 AI は推奨にすぎず、人の判定が最終結果です。各論文を Include、Related、Exclude のいずれかに
 決定し、Later は一時保留にだけ使います。Related は修復、説明可能性、背景、下流技術など、核心と
-分けて保持したい文献に使えます。全件を確定して保存しないと次の snowball round へ進めません。
+分けて保持したい文献に使えます。セル編集を確定すると判定とメモは自動保存され、件数とフローも
+更新されます。全件を確定しないと次の snowball round へ進めません。監査変更後は古い最終出力が
+無効になるため、Results で再生成してください。
 
 #### 3.7 Snowball
 
@@ -800,6 +859,8 @@ AI 出力は必ず原論文で確認し、処理許可のある PDF だけをア
 
 プロジェクト、checkpoint、audit、出力、PDF、会話、分類結果は `data/app_projects/`、API キーは
 `.secrets/app_projects/` に保存されます。通常の再起動や提供設定での Docker 再構築では削除されません。
+手動更新では `data/` と `.secrets/` を保持すれば作業を維持できますが、推奨方法は旧版で ZIP を
+ダウンロードし、新版の **Backup and restore** から導入することです。
 
 ---
 
@@ -827,11 +888,18 @@ sh start.sh
 ```
 
 <http://localhost:8501>을 엽니다. 최초 실행 시 폴더 안에 전용 `uv`, Python 및 의존성을 설치하며
-시스템 Python은 변경하지 않습니다. 종료하려면 실행 터미널에서 `Ctrl+C`를 누르세요. `uv`가 이미
-있다면 `uv sync --no-dev`와 `uv run vnn-survey-app`을 사용할 수 있습니다. Docker는
+시스템 Python은 변경하지 않습니다. 종료하려면 실행 터미널 또는 명령 창을 닫으세요. Streamlit
+개발자 단축키는 비활성화되어 브라우저 복사 기능을 방해하지 않습니다. `uv`가 이미 있다면
+`uv sync --no-dev`와 `uv run vnn-survey-app`을 사용할 수 있습니다. Docker는
 `docker compose up --build`로 시작하고 `docker compose down`으로 종료합니다.
 
 ### 3. 각 페이지
+
+사이드바의 **Backup and restore**는 모든 프로젝트, 실행 checkpoint, audit, 결과, PDF, 대화 및
+분석을 하나의 버전 ZIP으로 만듭니다. 다시 만들 수 있는 API cache와 API key는 기본적으로 제외됩니다.
+key를 포함한 ZIP은 비공개로 보관해야 합니다. 새 버전에서 ZIP을 업로드해 복원할 수 있으며, 같은
+프로젝트는 기본적으로 건너뛰고 명시적으로 확인한 경우에만 교체합니다. 가져올 때 이전 환경의 절대
+경로도 새 위치로 변환됩니다.
 
 #### 3.1 Scope
 
@@ -845,7 +913,7 @@ AND가 아닙니다. Query preview를 확인하고 범위를 바꾼 뒤 AI setti
 
 DBLP는 컴퓨터 과학, OpenAlex는 다학제 검색과 인용, Crossref는 DOI 메타데이터, arXiv는 정량 분야
 프리프린트, PubMed는 생의학에 적합합니다. 하나의 데이터베이스만으로는 완전하지 않습니다.
-OpenAIRE와 Europeana는 계획 단계라 현재 실시간 검색할 수 없습니다. 알려진 누락 자료는 Add papers로
+OpenAIRE와 Europeana는 계획 단계라 현재 실시간 검색할 수 없습니다. 알려진 누락 자료는 Manual review 맨 아래의 Add papers로
 보완하세요.
 
 #### 3.3 AI settings
@@ -870,19 +938,20 @@ Query / Abstract limit의 `0`은 전체를 의미하고 작은 값은 테스트�
 있습니다. **Resume run**은 최근 checkpoint에서 계속합니다. **Start a new initial run**은 기존 파일을
 보존하면서 첫 단계부터 별도 run을 만드는 기능입니다.
 
-#### 3.5 Add papers
+#### 3.5 Manual review 안의 Add papers
 
 알고 있는 제목을 선택한 소스에서 찾아 올바른 메타데이터를 확인하거나 title, authors, year, venue,
 publication type, DOI, URL과 추가 이유를 직접 입력합니다. 기록은 중복 제거됩니다. 첫 review queue를
-만들기 전에 **Synchronize manual papers**를 누르세요. audit이 이미 존재하면 기록을 다시 쓰지 않고
-새 initial run으로 포함합니다.
+만들기 전에는 **Synchronize manual papers**를 누릅니다. queue가 만들어진 뒤에는 선택한 audit round에
+논문이 즉시 추가되고 수와 문헌 흐름도 갱신됩니다. 추가 양식은 Manual review 맨 아래에 있습니다.
 
 #### 3.6 Manual review
 
 AI는 추천만 제공하며 사람의 결정이 최종 결과입니다. 각 논문을 Include, Related, Exclude로 확정하고
 Later는 임시 보류에만 사용합니다. Related는 repair, explainability, 배경 또는 관련 하위 기술을 핵심
-문헌과 구분해 보존할 때 사용할 수 있습니다. 모든 논문을 확정하고 저장해야 다음 snowball round로
-진행할 수 있습니다.
+문헌과 구분해 보존할 때 사용할 수 있습니다. 셀 편집을 확정하면 결정과 메모가 자동 저장되고 통계와
+흐름도 즉시 갱신됩니다. 모든 논문을 확정해야 다음 snowball round로 진행할 수 있습니다. audit이
+바뀌면 이전 최종 결과는 무효화되므로 Results에서 다시 생성해야 합니다.
 
 #### 3.7 Snowball
 
@@ -902,3 +971,5 @@ AI 결과는 원문으로 검증하고 처리 권한이 있는 PDF만 업로드�
 프로젝트, checkpoint, audit, 내보내기, PDF, 대화 및 분류 결과는 `data/app_projects/`에 저장되고 API
 키는 `.secrets/app_projects/`에 별도로 저장됩니다. 일반 재시작과 제공된 설정의 Docker 재빌드에서는
 삭제되지 않습니다.
+수동 업데이트에서는 `data/`와 `.secrets/`를 유지하면 작업이 보존됩니다. 더 안전한 방법은 이전
+버전에서 ZIP을 다운로드한 뒤 새 버전의 **Backup and restore**에서 가져오는 것입니다.

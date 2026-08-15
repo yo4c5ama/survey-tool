@@ -11,13 +11,15 @@ def main() -> None:
     app_path = Path(__file__).with_name("main.py")
     address = os.environ.get("SURVEYFLOW_ADDRESS", "localhost")
     port = os.environ.get("SURVEYFLOW_PORT", "8501")
+    max_upload_size = os.environ.get("SURVEYFLOW_MAX_UPLOAD_MB", "500")
     sys.argv = [
         "streamlit",
         "run",
         str(app_path),
         "--server.headless=true",
         "--browser.gatherUsageStats=false",
-        "--server.maxUploadSize=50",
+        f"--server.maxUploadSize={max_upload_size}",
+        "--client.toolbarMode=minimal",
         f"--server.address={address}",
         f"--server.port={port}",
     ]

@@ -17,6 +17,8 @@ def test_app_opens_project_creation(monkeypatch, tmp_path: Path) -> None:
 
     assert not app.exception
     assert any(title.value == "SurveyFlow" for title in app.title)
+    assert any(item.label == "Backup and restore" for item in app.expander)
+    assert any(item.key == "project_backup_upload" for item in app.file_uploader)
 
 
 def test_app_switches_between_all_interface_languages(monkeypatch, tmp_path: Path) -> None:
@@ -66,7 +68,7 @@ def test_create_project_recommends_sources_for_selected_field(
     assert sources.value == ["openalex", "crossref"]
 
 
-def test_manual_additions_workspace_opens_for_existing_project(
+def test_manual_review_allows_paper_additions_before_discovery(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -88,14 +90,87 @@ def test_manual_additions_workspace_opens_for_existing_project(
     app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
     app = AppTest.from_file(str(app_path)).run(timeout=20)
     workspace = next(item for item in app.radio if item.key == "workspace_page")
-    workspace.set_value("manual_additions")
+    workspace.set_value("manual_review")
     app.run(timeout=20)
 
     assert not app.exception
-    assert any(title.value == "Add papers" for title in app.title)
+    assert any(title.value == "Manual review" for title in app.title)
+    assert any(header.value == "Add papers" for header in app.subheader)
     assert any(
         item.key == "manual_lookup_title_manual-workspace" for item in app.text_input
     )
+
+
+def test_manual_review_embeds_live_paper_addition_workspace(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    secrets_root = tmp_path / "secrets"
+    monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
+    monkeypatch.setenv("VNN_SURVEY_APP_SECRETS", str(secrets_root))
+    store = ProjectStore(projects_root, secrets_root)
+    project = store.create_project(
+        name="Integrated Review",
+        research_question="Which papers?",
+        scope_description="Test scope",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    run_id = "integrated-review-run"
+    audit = store.project_dir(project.slug) / "audits" / run_id / "round_0.csv"
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    with audit.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["title", "year", "abstract", "manual_decision", "manual_notes"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "title": "A Review Paper",
+                "year": "2025",
+                "abstract": "An abstract.",
+                "manual_decision": "",
+                "manual_notes": "",
+            }
+        )
+    state = {
+        "project_slug": project.slug,
+        "run_id": run_id,
+        "status": "awaiting_manual_review",
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "rounds": [
+            {
+                "index": 0,
+                "kind": "initial",
+                "status": "ready_for_review",
+                "created_at": "2026-01-01T00:00:00",
+                "files": {"audit": str(audit)},
+                "counts": {"audit_queue": 1},
+                "flow": [],
+                "error": "",
+            }
+        ],
+    }
+    store.set_current_run(project.slug, run_id)
+    PipelineService(store)._save_state(project.slug, state)
+    st.cache_resource.clear()
+
+    app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    workspace = next(item for item in app.radio if item.key == "workspace_page")
+    workspace.set_value("manual_review")
+    app.run(timeout=20)
+
+    assert not app.exception
+    assert any(header.value == "Add papers" for header in app.subheader)
+    assert any(
+        item.key == "manual_lookup_title_integrated-review" for item in app.text_input
+    )
+    assert any("saved automatically" in item.value for item in app.caption)
 
 
 def test_ai_research_workspace_opens_for_exported_corpus(

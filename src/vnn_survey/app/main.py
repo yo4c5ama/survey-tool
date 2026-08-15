@@ -24,6 +24,12 @@ from vnn_survey.app.pipeline_service import (
     test_openai_connection,
 )
 from vnn_survey.app.project_store import KeywordGroup, ProjectSettings, ProjectStore
+from vnn_survey.app.project_transfer import (
+    ProjectTransferError,
+    create_projects_backup,
+    import_projects_backup,
+    save_uploaded_backup,
+)
 from vnn_survey.app.run_flow import build_flow_svg, flow_summary_payload, round_flow_stages
 from vnn_survey.app.task_manager import TaskManager
 from vnn_survey.config import expand_query_alternatives, load_config
@@ -36,7 +42,6 @@ PAGE_LABELS = {
     "scope": "Scope",
     "ai_settings": "AI settings",
     "run_center": "Run center",
-    "manual_additions": "Add papers",
     "manual_review": "Manual review",
     "snowball": "Snowball",
     "results": "Results",
@@ -78,6 +83,7 @@ def main() -> None:
     projects = store.list_projects()
     _render_sidebar_header()
     _render_language_selector()
+    _render_backup_restore(store, projects)
     if not projects:
         st.sidebar.info(_t("Create your first survey project to begin."))
         _render_create_project(store)
@@ -133,10 +139,8 @@ def main() -> None:
         _render_ai_settings(store, project)
     elif page == "run_center":
         _render_run_center(store, service, project)
-    elif page == "manual_additions":
-        _render_manual_additions(store, service, project)
     elif page == "manual_review":
-        _render_manual_review(service, project)
+        _render_manual_review(store, service, project)
     elif page == "snowball":
         _render_snowball(service, project)
     elif page == "results":
@@ -172,6 +176,153 @@ def _render_language_selector() -> None:
         format_func=language_name,
         key="ui_language",
     )
+
+
+def _render_backup_restore(
+    store: ProjectStore,
+    projects: list[ProjectSettings],
+) -> None:
+    running = any(_task_manager().is_running(project.slug) for project in projects)
+    with st.sidebar.expander(_t("Backup and restore")):
+        feedback = st.session_state.pop("project_import_feedback", None)
+        if feedback:
+            st.success(
+                _t(
+                    "Imported {imported} project(s); skipped {skipped} existing project(s).",
+                    imported=feedback["imported"],
+                    skipped=feedback["skipped"],
+                )
+            )
+            if feedback["secrets_restored"]:
+                st.caption(
+                    _t(
+                        "Saved API keys were restored for {count} project(s).",
+                        count=feedback["secrets_restored"],
+                    )
+                )
+            elif feedback["backup_includes_secrets"]:
+                st.warning(_t("The backup contains API keys, but they were not restored."))
+
+        st.caption(
+            _t(
+                "Export every project, run checkpoint, review, PDF, conversation, and analysis."
+            )
+        )
+        include_caches = st.checkbox(
+            _t("Include rebuildable API caches"),
+            value=False,
+            key="backup_include_caches",
+        )
+        include_secrets = st.checkbox(
+            _t("Include saved API keys"),
+            value=False,
+            key="backup_include_secrets",
+        )
+        if include_secrets:
+            st.warning(
+                _t(
+                    "API keys are stored as readable files inside the ZIP. "
+                    "Keep this backup private."
+                )
+            )
+        if running:
+            st.info(_t("Stop all running project tasks before exporting or importing."))
+        if st.button(
+            _t("Create backup"),
+            icon=":material/archive:",
+            width="stretch",
+            disabled=not projects or running,
+        ):
+            try:
+                result = create_projects_backup(
+                    store,
+                    include_secrets=include_secrets,
+                    include_caches=include_caches,
+                )
+            except (OSError, ProjectTransferError) as exc:
+                st.error(_runtime_text(str(exc)))
+            else:
+                st.session_state["project_backup_path"] = str(result.path)
+                st.session_state["project_backup_summary"] = {
+                    "projects": result.project_count,
+                    "files": result.file_count,
+                    "source_bytes": result.source_bytes,
+                }
+
+        backup_value = st.session_state.get("project_backup_path")
+        backup_path = Path(backup_value) if backup_value else None
+        if backup_path and backup_path.exists():
+            summary = st.session_state.get("project_backup_summary", {})
+            st.caption(
+                _t(
+                    "Ready: {projects} project(s), {files} files, {size} before compression.",
+                    projects=summary.get("projects", 0),
+                    files=summary.get("files", 0),
+                    size=_format_bytes(summary.get("source_bytes", 0)),
+                )
+            )
+            with backup_path.open("rb") as handle:
+                st.download_button(
+                    _t("Download backup"),
+                    data=handle,
+                    file_name=backup_path.name,
+                    mime="application/zip",
+                    icon=":material/download:",
+                    width="stretch",
+                )
+
+        st.divider()
+        uploaded = st.file_uploader(
+            _t("Import SurveyFlow backup"),
+            type=["zip"],
+            key="project_backup_upload",
+        )
+        replace_existing = st.checkbox(
+            _t("Replace matching projects with the backup"),
+            value=False,
+            key="project_import_replace",
+        )
+        conflict = "replace" if replace_existing else "skip"
+        restore_secrets = st.checkbox(
+            _t("Restore saved API keys when present"),
+            value=False,
+            key="project_import_secrets",
+        )
+        replace_confirmed = True
+        if replace_existing:
+            replace_confirmed = st.checkbox(
+                _t("I understand that matching project data will be replaced"),
+                value=False,
+                key="project_import_replace_confirmed",
+            )
+        if st.button(
+            _t("Import backup"),
+            icon=":material/upload:",
+            width="stretch",
+            disabled=(
+                uploaded is None
+                or running
+                or (replace_existing and not replace_confirmed)
+            ),
+        ):
+            try:
+                upload_path = save_uploaded_backup(store, uploaded.getvalue())
+                result = import_projects_backup(
+                    store,
+                    upload_path,
+                    conflict=conflict,
+                    restore_secrets=restore_secrets,
+                )
+            except (OSError, ProjectTransferError, ValueError) as exc:
+                st.error(_runtime_text(str(exc)))
+            else:
+                st.session_state["project_import_feedback"] = {
+                    "imported": len(result.imported),
+                    "skipped": len(result.skipped),
+                    "secrets_restored": len(result.restored_secret_projects),
+                    "backup_includes_secrets": result.backup_includes_secrets,
+                }
+                st.rerun()
 
 
 def _render_sidebar_status(project: ProjectSettings, state: dict[str, Any] | None) -> None:
@@ -910,8 +1061,15 @@ def _render_manual_additions(
     store: ProjectStore,
     service: PipelineService,
     project: ProjectSettings,
+    *,
+    embedded: bool = False,
+    target_round_index: int | None = None,
 ) -> None:
-    st.title(_t("Add papers"))
+    if embedded:
+        st.divider()
+        st.subheader(_t("Add papers"))
+    else:
+        st.title(_t("Add papers"))
     st.write(
         _t(
             "Add known papers that automatic searches missed. Confirm a metadata match or "
@@ -925,6 +1083,10 @@ def _render_manual_additions(
     task = _task_manager().snapshot(project.slug)
     if task and task.running:
         _render_current_run_progress(project.slug, service)
+
+    feedback = st.session_state.pop(f"manual_addition_feedback_{project.slug}", None)
+    if feedback:
+        _render_manual_addition_feedback(feedback)
 
     st.subheader(_t("Saved manual papers"))
     if records:
@@ -955,8 +1117,8 @@ def _render_manual_additions(
             icon=":material/delete:",
             disabled=bool(task and task.running),
         ):
-            manual_store.remove(records[remove_index].dedupe_key())
-            st.success(_t("The manual paper was removed."))
+            result = service.remove_manual_paper(project.slug, records[remove_index])
+            st.session_state[f"manual_addition_feedback_{project.slug}"] = result
             st.rerun()
     else:
         st.info(_t("No papers have been added manually."))
@@ -1028,13 +1190,15 @@ def _render_manual_additions(
             _t("Add selected match"),
             type="primary",
             icon=":material/add:",
+            disabled=bool(task and task.running),
         ):
-            _, added = manual_store.add(selected, note)
-            st.success(
-                _t("Paper added to the manual collection.")
-                if added
-                else _t("The existing manual record was updated instead of duplicated.")
+            result = service.add_manual_paper(
+                project.slug,
+                selected,
+                note,
+                round_index=target_round_index,
             )
+            st.session_state[f"manual_addition_feedback_{project.slug}"] = result
             st.session_state[f"manual_matches_{project.slug}"] = []
             st.rerun()
     elif f"manual_matches_{project.slug}" in st.session_state:
@@ -1062,7 +1226,11 @@ def _render_manual_additions(
                 manual_doi = st.text_input("DOI")
                 manual_url = st.text_input(_t("URL"))
                 manual_note = st.text_input(_t("Addition note"))
-            submitted = st.form_submit_button(_t("Add manual record"), type="primary")
+            submitted = st.form_submit_button(
+                _t("Add manual record"),
+                type="primary",
+                disabled=bool(task and task.running),
+            )
         if submitted:
             try:
                 record = create_manual_record(
@@ -1075,12 +1243,13 @@ def _render_manual_additions(
                     publication_type=manual_type,
                     note=manual_note,
                 )
-                _, added = manual_store.add(record, manual_note)
-                st.success(
-                    _t("Paper added to the manual collection.")
-                    if added
-                    else _t("The existing manual record was updated instead of duplicated.")
+                result = service.add_manual_paper(
+                    project.slug,
+                    record,
+                    manual_note,
+                    round_index=target_round_index,
                 )
+                st.session_state[f"manual_addition_feedback_{project.slug}"] = result
                 st.rerun()
             except ValueError as exc:
                 st.error(_runtime_text(str(exc)))
@@ -1097,11 +1266,11 @@ def _render_manual_additions(
     if not initial_round:
         st.info(_t("Saved papers will be included automatically in the next initial discovery."))
         return
-    if initial_round.get("files", {}).get("audit"):
-        st.warning(
+    if any(item.get("files", {}).get("audit") for item in state.get("rounds", [])):
+        st.success(
             _t(
-                "The initial review queue already exists. Start a new initial run to include "
-                "newly saved papers without rewriting the audit history."
+                "New manual papers are added directly to the selected review round and update "
+                "the literature flow immediately."
             )
         )
         return
@@ -1188,15 +1357,21 @@ def _review_preparation_panel(
             st.warning(_t("A pipeline task is already running for this project."))
 
 
-def _render_manual_review(service: PipelineService, project: ProjectSettings) -> None:
+def _render_manual_review(
+    store: ProjectStore,
+    service: PipelineService,
+    project: ProjectSettings,
+) -> None:
     st.title(_t("Manual review"))
     state = service.current_state_or_none(project.slug)
     if not state:
         st.info(_t("Run initial discovery before opening the review workspace."))
+        _render_manual_additions(store, service, project, embedded=True)
         return
     review_rounds = [item for item in state["rounds"] if item.get("files", {}).get("audit")]
     if not review_rounds:
         st.info(_t("Prepare the current round for review in the Run center."))
+        _render_manual_additions(store, service, project, embedded=True)
         return
     indexes = [int(item["index"]) for item in review_rounds]
     round_index = st.selectbox(
@@ -1206,8 +1381,31 @@ def _render_manual_review(service: PipelineService, project: ProjectSettings) ->
         key=f"audit_round_{state['run_id']}",
     )
     round_state = next(item for item in review_rounds if int(item["index"]) == round_index)
+    reconcile_key = f"manual_reconciled_{state['run_id']}_{round_index}"
+    task = _task_manager().snapshot(project.slug)
+    if not st.session_state.get(reconcile_key) and not (task and task.running):
+        st.session_state[reconcile_key] = True
+        reconciled = service.reconcile_saved_manual_papers(project.slug, round_index)
+        if reconciled["added"]:
+            st.session_state[f"manual_addition_feedback_{project.slug}"] = {
+                "status": "reconciled_saved_papers",
+                "count": reconciled["added"],
+            }
+            st.rerun()
     audit_path = Path(round_state["files"]["audit"])
     _, rows, summary = load_audit(audit_path)
+    autosave_feedback = st.session_state.pop(
+        f"audit_autosave_feedback_{state['run_id']}_{round_index}",
+        None,
+    )
+    if autosave_feedback:
+        st.success(
+            _t(
+                "Saved {reviewed} reviewed papers; {unreviewed} still require a decision.",
+                reviewed=autosave_feedback[0],
+                unreviewed=autosave_feedback[1],
+            )
+        )
     metrics = st.columns(5)
     metrics[0].metric(_t("Candidates"), summary.total)
     metrics[1].metric(_t("Reviewed"), summary.reviewed)
@@ -1289,15 +1487,15 @@ def _render_manual_review(service: PipelineService, project: ProjectSettings) ->
         },
         key=f"audit_editor_{state['run_id']}_{round_index}",
     )
-    if st.button(_t("Save review decisions"), type="primary", icon=":material/save:"):
-        updated_rows = _merge_editor_identity(filtered, edited)
+    st.caption(_t("Review decisions are saved automatically after each committed cell edit."))
+    updated_rows = _merge_editor_identity(filtered, edited)
+    if _audit_rows_changed(filtered, updated_rows):
         saved_summary = service.update_audit(project.slug, round_index, updated_rows)
-        st.success(
-            _t(
-                "Saved {reviewed} reviewed papers; {unreviewed} still require a decision.",
-                reviewed=saved_summary.reviewed,
-                unreviewed=saved_summary.unreviewed,
-            )
+        st.session_state[
+            f"audit_autosave_feedback_{state['run_id']}_{round_index}"
+        ] = (
+            saved_summary.reviewed,
+            saved_summary.unreviewed,
         )
         st.rerun()
 
@@ -1313,6 +1511,13 @@ def _render_manual_review(service: PipelineService, project: ProjectSettings) ->
     st.subheader(_t("Paper reader"))
     if frame.empty:
         st.info(_t("This round contains no new papers."))
+        _render_manual_additions(
+            store,
+            service,
+            project,
+            embedded=True,
+            target_round_index=round_index,
+        )
         return
     labels = [f"{row.get('year', '')} · {row.get('title', '')}" for row in rows]
     selected = st.selectbox(
@@ -1331,6 +1536,14 @@ def _render_manual_review(service: PipelineService, project: ProjectSettings) ->
         st.write(paper.get("llm_reason"))
         if paper.get("llm_evidence"):
             st.caption(_t("Evidence: {evidence}", evidence=paper.get("llm_evidence")))
+
+    _render_manual_additions(
+        store,
+        service,
+        project,
+        embedded=True,
+        target_round_index=round_index,
+    )
 
 
 def _render_snowball(service: PipelineService, project: ProjectSettings) -> None:
@@ -1831,6 +2044,7 @@ def _render_round_overview(state: dict[str, Any]) -> None:
                 _t("Status"): _state_label(item.get("status", "")),
                 _t("Pool"): counts.get("pool_rows", counts.get("deduped_records", "")),
                 _t("Added"): counts.get("added_rows", ""),
+                _t("Manual added"): counts.get("manual_review_additions", ""),
                 _t("Rule excluded"): counts.get("rule_excluded", ""),
                 _t("Title kept"): counts.get("title_kept", ""),
                 _t("Title excluded"): counts.get("title_excluded", ""),
@@ -2037,6 +2251,45 @@ def _manual_match_label(record: PaperRecord) -> str:
     year = record.year or _t("Unknown year")
     sources = "/".join(source.upper() for source in record.discovery_sources)
     return f"{sources} · {year} · {authors} · {record.title}"
+
+
+def _render_manual_addition_feedback(result: dict[str, Any]) -> None:
+    status = result.get("status")
+    if status == "added_to_review":
+        st.success(
+            _t(
+                "Paper added directly to manual review round {round_index}.",
+                round_index=result.get("round_index", ""),
+            )
+        )
+    elif status == "already_in_review":
+        st.info(
+            _t(
+                "This paper is already present in manual review round {round_index}; no "
+                "duplicate was created.",
+                round_index=result.get("round_index", ""),
+            )
+        )
+    elif status == "removed_from_review":
+        st.success(
+            _t(
+                "The manual paper was removed from the saved collection and manual review; "
+                "counts and the literature flow were updated."
+            )
+        )
+    elif status == "removed_from_collection":
+        st.success(_t("The manual paper was removed."))
+    elif status == "reconciled_saved_papers":
+        st.success(
+            _t(
+                "Added {count} previously saved manual papers to this review round.",
+                count=result.get("count", 0),
+            )
+        )
+    elif result.get("collection_added"):
+        st.success(_t("Paper added to the manual collection."))
+    else:
+        st.info(_t("The existing manual record was updated instead of duplicated."))
 
 
 def _render_model_selector(
@@ -2397,6 +2650,23 @@ def _merge_editor_identity(original: pd.DataFrame, edited: pd.DataFrame) -> list
     return updates
 
 
+def _audit_rows_changed(
+    original: pd.DataFrame,
+    updates: list[dict[str, str]],
+) -> bool:
+    for position, update in enumerate(updates):
+        original_row = original.iloc[position]
+        if str(original_row.get("manual_decision") or "").strip().lower() != str(
+            update.get("manual_decision") or ""
+        ).strip().lower():
+            return True
+        if str(original_row.get("manual_notes") or "").strip() != str(
+            update.get("manual_notes") or ""
+        ).strip():
+            return True
+    return False
+
+
 def _paper_metadata(row: dict[str, Any]) -> str:
     def display_text(value: Any) -> str:
         if value is None:
@@ -2421,6 +2691,16 @@ def _paper_metadata(row: dict[str, Any]) -> str:
         f"IF {impact_factor}" if impact_factor else "",
     ]
     return " · ".join(value for value in values if value)
+
+
+def _format_bytes(value: Any) -> str:
+    size = max(float(value or 0), 0.0)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return "0 B"
 
 
 def _apply_styles() -> None:

@@ -354,6 +354,13 @@ class ProjectStore:
         shutil.rmtree(self.project_dir(slug), ignore_errors=True)
         shutil.rmtree(self.secrets_root / slug, ignore_errors=True)
 
+    def refresh_project_configs(self, slug: str) -> ProjectSettings:
+        """Regenerate machine-local paths without changing project metadata."""
+
+        settings = self.load_project(slug)
+        self._write_project_configs(settings)
+        return settings
+
     def _available_slug(self, base: str) -> str:
         candidate = base
         counter = 2

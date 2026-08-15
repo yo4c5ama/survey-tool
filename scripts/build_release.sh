@@ -17,6 +17,7 @@ zip -q -FS -r "$OUTPUT_FILE" \
     Dockerfile \
     compose.yaml \
     .dockerignore \
+    .streamlit/config.toml \
     src \
     configs/domain_profiles.yaml \
     configs/source_catalog.yaml \
