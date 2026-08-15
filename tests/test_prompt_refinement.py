@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
 from vnn_survey.config import load_config
 from vnn_survey.llm_screening import LlmScreeningResult, LlmScreeningSummary
+from vnn_survey.prompt_refinement import load_prompt_refinement
 
 
 def test_prompt_refinement_requires_approval_before_changing_prompt(
@@ -102,6 +104,62 @@ def test_prompt_refinement_rejects_stale_human_feedback(
 
     with pytest.raises(RuntimeError, match="initial audit changed"):
         service.approve_prompt_refinement(slug, "Do not approve this stale proposal.")
+
+
+def test_prompt_refinement_rejects_an_alternative_response_structure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, service, slug, _state = _refinement_project(tmp_path)
+    baseline = store.system_prompt_path(slug).read_text(encoding="utf-8")
+
+    class FakeResearchClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def json_response(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "new_prompt": "An incompatible response shape.",
+                "rules": ["A renamed field."],
+            }
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.OpenAIResearchClient",
+        FakeResearchClient,
+    )
+
+    with pytest.raises(RuntimeError, match="invalid 'revised_prompt' field"):
+        service.generate_prompt_refinement(slug)
+
+    assert store.system_prompt_path(slug).read_text(encoding="utf-8") == baseline
+    assert "prompt_refinement" not in service.load_current_state(slug)
+
+
+def test_prompt_refinement_loader_accepts_legacy_schema_and_rejects_unknown_version(
+    tmp_path: Path,
+) -> None:
+    proposal_path = tmp_path / "proposal.json"
+    proposal = {
+        "revised_prompt": "A compatible legacy prompt.",
+        "change_summary": "Summary",
+        "retained_principles": ["Keep the fixed contract."],
+        "new_rules": [],
+        "risks": [],
+        "rows_total": 5,
+        "rows_used": 4,
+        "baseline_prompt_path": str(tmp_path / "baseline_prompt.txt"),
+    }
+    proposal_path.write_text(json.dumps(proposal), encoding="utf-8")
+
+    loaded = load_prompt_refinement(proposal_path)
+
+    assert loaded["schema_version"] == 1
+    assert loaded["rows_total"] == 5
+
+    proposal["schema_version"] = 2
+    proposal_path.write_text(json.dumps(proposal), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unsupported schema version"):
+        load_prompt_refinement(proposal_path)
 
 
 def test_replay_recovers_only_newly_retained_initial_exclusions(

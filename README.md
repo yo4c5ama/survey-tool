@@ -11,39 +11,25 @@ snowballing, final export, PDF question answering, and corpus classification.
 
 ```mermaid
 flowchart TD
-    A["Define the research scope<br/>Question, years, keywords, criteria, and sources"] --> B["Search selected literature sources"]
-    B --> C["Normalize and deduplicate records"]
-    C --> E["Apply rule-based title exclusions"]
-    E --> T{"Use batched AI title prescreen?"}
-    T -- Yes --> U["Keep relevant or ambiguous titles<br/>Cache every title decision"]
-    T -- No --> D["Resolve published versions and venue rank/IF<br/>Preserve native abstracts, then use fallbacks"]
-    U --> D
-    D --> F{"Use abstract-level AI screening?"}
-    F -- Yes --> G["Generate AI recommendations<br/>from titles and abstracts"]
-    F -- No --> H["Create a human-only review queue"]
-    G --> H
-    H --> I["Human audit<br/>Include, related, exclude, or review later"]
-    I -- "Add known papers" --> D
-    I --> P{"Refine the prompt from<br/>the completed initial audit?"}
-    P -- "Review and approve" --> R["Activate the human-approved prompt"]
-    P -- "Keep current prompt" --> J{"Run citation snowballing?"}
-    R --> J
-    R -. "Optional during first snowball round" .-> O["Replay initial AI exclusions<br/>Recovered papers return to human audit"]
-    O --> H
-    J -- Yes --> K["Collect references and citing works<br/>from included and related papers"]
-    K --> C
-    J -- "No or converged" --> L["Export the final corpus<br/>with its complete audit trail"]
-    L --> M["Ask questions about selected PDFs<br/>with saved conversation memory"]
-    L --> N["Design a taxonomy and<br/>classify the final corpus"]
+    A["Define research scope"] --> B["Literature discovery"]
+    B --> C["Normalize and deduplicate"]
+    C --> D["Rule screening"]
+    D --> E["AI title screening<br/>(optional)"]
+    E --> F["AI abstract screening<br/>(optional)"]
+    F --> G["Add known papers"]
+    G --> H["Human audit"]
+    H --> I["Citation snowballing"]
+    I -- "New records" --> C
+    I -- "Converged" --> J["Final corpus"]
 ```
 
 AI screening is optional and produces recommendations only. A human reviewer
 makes the final inclusion decision in the initial discovery round and every
 snowballing round. The Run Center records the number of papers entering,
-leaving, and remaining after each stage. Enrichment stages add metadata and do
-not remove records. The **Add known papers** loop always performs abstract-level
-AI screening; every manual addition returns to Human audit even when AI recommends
-exclusion.
+leaving, and remaining after each stage. Venue and abstract enrichment still run
+but are intentionally omitted from the high-level diagram. **Add known papers**
+is shown immediately before Human audit; every manual addition enters that audit
+even when AI recommends exclusion.
 
 ---
 
@@ -308,10 +294,12 @@ retrieval missed.
    abstracts; and then runs abstract-level AI screening. Every paper enters the
    selected Manual Review round, including papers that AI recommends excluding.
 6. Removing an enriched manual paper also removes it from Manual Review and
-   updates the saved counts and loop. Automatically discovered matches remain.
+   updates the saved counts. Automatically discovered matches remain.
 
 Older direct additions that have not been enriched are recognized as pending and
-can enter the same loop without being added again.
+can enter the same processing path without being added again. The simplified
+flow diagram places Manual additions immediately before Human audit and omits
+the internal enrichment steps.
 
 Every manual paper is normalized and deduplicated. If no run exists, it enters
 the next initial discovery automatically. If a review queue exists, use the
@@ -727,9 +715,9 @@ publication type、DOI、URL 和 addition note。补录记录也会标准化和�
 首次审阅队列建立前点击 **Synchronize manual papers**，让补录论文经过初始流程。审阅队列建立后，
 新增论文先进入待 enrichment 清单；点击 **启动 enrichment 和 AI 筛选** 后，它会跳过 discovery、
 规则筛选和标题预筛，补全 venue 类型、rank/IF 与摘要，然后执行摘要级 AI 筛选。无论 AI 建议纳入、
-排除还是待定，论文都会进入当前人工审阅轮次。流程图会显示
-“人工审阅 -> 人工补录 -> enrichment -> 人工审阅”的循环。删除已处理补录论文时，审阅表、计数和
-循环也会同步更新；自动检索到的相同论文不会被删除。添加入口位于**人工审阅**页面最下方。
+排除还是待定，论文都会进入当前人工审阅轮次。简化流程图会把“人工补录”放在“人工审计”之前，
+并隐藏内部 enrichment 节点；删除已处理补录论文时，审阅表和计数也会同步更新，自动检索到的相同
+论文不会被删除。添加入口位于**人工审阅**页面最下方。
 
 #### 3.6 人工审阅
 
@@ -897,8 +885,8 @@ URL、追加理由を手入力します。重複は統合されます。最初�
 **Synchronize manual papers** を実行します。review queue 作成後は、論文が選択中の audit round へ
 直接は追加されず、enrichment 待ちになります。**Start enrichment and AI screening** を押すと、
 venue type、rank/IF、欠落抄録を補完してから AI 抄録選別を実行します。AI が除外を推奨した場合も
-含め、すべての論文が選択中の audit round に戻ります。文献フローには Manual review から
-enrichment を経て戻るループが表示されます。フォームは Manual review の末尾にあります。
+含め、すべての論文が選択中の audit round に戻ります。簡略化したフロー図では Manual additions を
+Human audit の直前に置き、内部 enrichment 工程は表示しません。フォームは Manual review の末尾にあります。
 
 #### 3.6 Manual review
 
@@ -1030,8 +1018,8 @@ publication type, DOI, URL과 추가 이유를 직접 입력합니다. 기록은
 만들기 전에는 **Synchronize manual papers**를 누릅니다. queue가 만들어진 뒤에는 선택한 audit round에
 바로 추가되지 않고 enrichment 대기 상태가 됩니다. **Start enrichment and AI screening**을 누르면
 venue type, rank/IF와 누락 초록을 보강한 뒤 AI 초록 선별을 실행합니다. AI가 제외를 권고한 경우를
-포함해 모든 논문이 선택한 audit round로 돌아갑니다. 문헌 흐름에는 Manual review에서 enrichment를
-거쳐 다시 돌아오는 순환이 표시됩니다. 추가 양식은 Manual review 맨 아래에 있습니다.
+포함해 모든 논문이 선택한 audit round로 돌아갑니다. 간소화된 흐름도에서는 Manual additions를
+Human audit 바로 앞에 두고 내부 enrichment 단계는 표시하지 않습니다. 추가 양식은 Manual review 맨 아래에 있습니다.
 
 #### 3.6 Manual review
 

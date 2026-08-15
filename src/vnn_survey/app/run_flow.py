@@ -3,6 +3,25 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
+DISPLAY_STAGE_ORDER = [
+    "literature_search",
+    "citation_snowballing",
+    "deduplication",
+    "rule_screening",
+    "ai_title_screening",
+    "ai_abstract_screening",
+    "prompt_replay",
+    "manual_additions",
+    "human_audit",
+    "final_corpus",
+]
+MANUAL_STAGE_KEYS = {
+    "manual_additions",
+    "manual_review_additions",
+    "manual_loop_additions",
+    "manual_return_to_review",
+}
+
 
 def record_flow_stage(
     round_state: dict[str, Any],
@@ -137,26 +156,6 @@ def build_flow_svg(state: dict[str, Any]) -> str:
                 f'<text x="{x + 11}" y="{node_y + 94}" font-family="Arial, sans-serif" '
                 f'font-size="10" fill="#596273">{escape(change)}</text>'
             )
-        positions = {str(stage.get("key") or ""): index for index, stage in enumerate(stages)}
-        for stage_index, stage in enumerate(stages):
-            target_index = positions.get(str(stage.get("loop_to") or ""))
-            if target_index is None or target_index >= stage_index:
-                continue
-            source_x = 18 + stage_index * 190 + 81
-            target_x = 18 + target_index * 190 + 81
-            node_bottom = y + 24 + 116
-            loop_y = node_bottom + 30
-            parts.append(
-                f'<path d="M {source_x} {node_bottom} C {source_x} {loop_y}, '
-                f'{target_x} {loop_y}, {target_x} {node_bottom}" fill="none" '
-                'stroke="#397d73" stroke-width="1.8" stroke-dasharray="5 3" '
-                'marker-end="url(#arrow)"/>'
-            )
-            parts.append(
-                f'<text x="{min(source_x, target_x) + 8}" y="{loop_y - 5}" '
-                'font-family="Arial, sans-serif" font-size="10" fill="#397d73">'
-                "manual enrichment loop</text>"
-            )
     parts.append("</svg>")
     return "".join(parts)
 
@@ -166,7 +165,7 @@ def round_flow_stages(round_state: dict[str, Any]) -> list[dict[str, Any]]:
 
     persisted = round_state.get("flow")
     if persisted:
-        return list(persisted)
+        return _display_flow_stages(list(persisted))
 
     counts = round_state.get("counts", {})
     stages: list[dict[str, Any]] = []
@@ -203,7 +202,7 @@ def round_flow_stages(round_state: dict[str, Any]) -> list[dict[str, Any]]:
         add("deduplication", "Deduplication", filtered, deduped)
     current = deduped if deduped is not None else pool
     if current is None:
-        return stages
+        return _display_flow_stages(stages)
 
     rule_excluded = _optional_int(counts.get("rule_excluded"))
     if rule_excluded is not None:
@@ -216,20 +215,6 @@ def round_flow_stages(round_state: dict[str, Any]) -> list[dict[str, Any]]:
         add("ai_title_screening", "AI title screening", current, title_kept)
         current = title_kept
 
-    abstracts_attempted = _optional_int(counts.get("abstracts_attempted"))
-    if abstracts_attempted is not None:
-        add(
-            "abstract_enrichment",
-            "Abstract enrichment",
-            current,
-            current,
-            stage_type="enrichment",
-            details={
-                "abstracts found": _optional_int(counts.get("abstracts_found")) or 0,
-                "attempted": abstracts_attempted,
-            },
-        )
-
     audit_queue = _optional_int(counts.get("audit_queue"))
     if audit_queue is not None:
         add(
@@ -239,7 +224,80 @@ def round_flow_stages(round_state: dict[str, Any]) -> list[dict[str, Any]]:
             audit_queue,
             stage_type="review",
         )
-    return stages
+    return _display_flow_stages(stages)
+
+
+def _display_flow_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce detailed persisted stages to the key decisions shown to users."""
+
+    by_key = {
+        str(stage.get("key") or ""): dict(stage)
+        for stage in stages
+        if stage.get("key")
+    }
+    audit_stage = by_key.get("human_audit") or by_key.get("audit_queue")
+    if audit_stage is not None:
+        audit_stage = dict(audit_stage)
+        audit_stage.update({"key": "human_audit", "label": "Human audit"})
+        audit_stage.pop("loop_to", None)
+        by_key["human_audit"] = audit_stage
+
+    manual_stages = [
+        dict(stage)
+        for stage in stages
+        if str(stage.get("key") or "") in MANUAL_STAGE_KEYS
+    ]
+    selected: list[dict[str, Any]] = []
+    for key in DISPLAY_STAGE_ORDER:
+        if key == "manual_additions":
+            manual_stage = _manual_display_stage(
+                manual_stages,
+                previous_stage=selected[-1] if selected else None,
+                audit_stage=audit_stage,
+            )
+            if manual_stage is not None:
+                selected.append(manual_stage)
+            continue
+        stage = by_key.get(key)
+        if stage is None:
+            continue
+        prepared = dict(stage)
+        prepared.pop("loop_to", None)
+        selected.append(prepared)
+    return selected
+
+
+def _manual_display_stage(
+    stages: list[dict[str, Any]],
+    *,
+    previous_stage: dict[str, Any] | None,
+    audit_stage: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not stages:
+        return None
+    manual_count = max((_manual_paper_count(stage) for stage in stages), default=0)
+    previous_count = max(int((previous_stage or {}).get("retained") or 0), 0)
+    audit_count = max(int((audit_stage or {}).get("input") or 0), 0)
+    retained = audit_count or max(previous_count + manual_count, manual_count)
+    input_count = previous_count or max(retained - manual_count, 0)
+    return {
+        "key": "manual_additions",
+        "label": "Manual additions",
+        "type": "discovery",
+        "input": input_count,
+        "retained": retained,
+        "excluded": 0,
+        "details": {"manual papers": manual_count},
+    }
+
+
+def _manual_paper_count(stage: dict[str, Any]) -> int:
+    details = stage.get("details") or {}
+    for key in ("manual papers", "submitted"):
+        value = _optional_int(details.get(key))
+        if value is not None:
+            return value
+    return _optional_int(stage.get("input")) or 0
 
 
 def _optional_int(value: Any) -> int | None:

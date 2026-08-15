@@ -6,6 +6,7 @@ from streamlit.testing.v1 import AppTest
 
 from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
+from vnn_survey.app.task_manager import TaskManager, TaskSnapshot
 
 
 def test_app_opens_project_creation(monkeypatch, tmp_path: Path) -> None:
@@ -305,6 +306,99 @@ def test_run_center_restores_saved_progress_and_paper_count(monkeypatch, tmp_pat
     paper_metric = next(metric for metric in app.metric if metric.label == "Papers collected")
     assert paper_metric.value == "37"
     assert any("37 papers collected" in item.proto.text for item in app.get("progress"))
+
+
+def test_live_progress_controls_are_scoped_when_rendered_twice(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    secrets_root = tmp_path / "secrets"
+    monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
+    monkeypatch.setenv("VNN_SURVEY_APP_SECRETS", str(secrets_root))
+    store = ProjectStore(projects_root, secrets_root)
+    project = store.create_project(
+        name="Scoped progress",
+        research_question="Which papers?",
+        scope_description="Test scope",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    run_id = "scoped-progress-run"
+    audit = store.project_dir(project.slug) / "audits" / run_id / "round_0.csv"
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    with audit.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["title", "manual_decision", "manual_notes"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "title": "A Reviewed Paper",
+                "manual_decision": "include",
+                "manual_notes": "In scope.",
+            }
+        )
+    state = {
+        "project_slug": project.slug,
+        "run_id": run_id,
+        "status": "running",
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "rounds": [
+            {
+                "index": 0,
+                "kind": "initial",
+                "status": "ready_for_review",
+                "created_at": "2026-01-01T00:00:00",
+                "files": {"audit": str(audit)},
+                "counts": {"audit_queue": 1, "reviewed": 1},
+                "flow": [],
+                "error": "",
+            }
+        ],
+        "progress": {
+            "operation": "Prompt refinement",
+            "status": "running",
+            "stages": ["Prompt refinement"],
+            "stage": "Prompt refinement",
+            "message": "Analyzing review decisions.",
+            "completed": 1,
+            "total": 2,
+            "paper_count": 1,
+        },
+    }
+    store.set_current_run(project.slug, run_id)
+    PipelineService(store)._save_state(project.slug, state)
+    monkeypatch.setattr(
+        TaskManager,
+        "snapshot",
+        lambda self, slug: TaskSnapshot(
+            operation="prompt_refinement",
+            started_at="2026-01-01T00:00:00",
+            running=True,
+            error="",
+            cancel_requested=False,
+            cancelled=False,
+            can_restart=False,
+        ),
+    )
+    st.cache_resource.clear()
+
+    app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    workspace = next(item for item in app.radio if item.key == "workspace_page")
+    workspace.set_value("manual_review")
+    app.run(timeout=20)
+
+    assert not app.exception
+    stop_keys = {item.key for item in app.button if item.label == "Stop run"}
+    assert stop_keys == {
+        f"stop_run_prompt_refinement_{project.slug}",
+        f"stop_run_manual_additions_{project.slug}",
+    }
 
 
 def test_ai_prompt_can_be_regenerated_after_widget_is_created(

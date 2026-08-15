@@ -919,7 +919,11 @@ def _render_run_center(
     state = service.current_state_or_none(project.slug)
     task = _task_manager().snapshot(project.slug)
     if state or task:
-        _render_current_run_progress(project.slug, service)
+        _render_current_run_progress(
+            project.slug,
+            service,
+            widget_scope="run_center",
+        )
     if state:
         _render_literature_flow(state)
         _render_round_overview(state)
@@ -1082,7 +1086,11 @@ def _render_manual_additions(
     state = service.current_state_or_none(project.slug)
     task = _task_manager().snapshot(project.slug)
     if task and task.running:
-        _render_current_run_progress(project.slug, service)
+        _render_current_run_progress(
+            project.slug,
+            service,
+            widget_scope="manual_additions",
+        )
 
     feedback = st.session_state.pop(f"manual_addition_feedback_{project.slug}", None)
     if feedback:
@@ -1627,7 +1635,11 @@ def _render_prompt_refinement(
 
     task = _task_manager().snapshot(project.slug)
     if task and task.running and task.operation == "prompt_refinement":
-        _render_current_run_progress(project.slug, service)
+        _render_current_run_progress(
+            project.slug,
+            service,
+            widget_scope="prompt_refinement",
+        )
         return
     if task and task.error and task.operation == "prompt_refinement":
         st.error(_t("Prompt refinement failed: {error}", error=_runtime_text(task.error)))
@@ -1640,6 +1652,9 @@ def _render_prompt_refinement(
     if status == "proposed":
         try:
             proposal = service.load_prompt_refinement_proposal(project.slug)
+            baseline_prompt = Path(proposal["baseline_prompt_path"]).read_text(
+                encoding="utf-8"
+            )
         except (OSError, RuntimeError, ValueError) as exc:
             st.error(_runtime_text(str(exc)))
             return
@@ -1673,9 +1688,7 @@ def _render_prompt_refinement(
         with prompt_columns[0]:
             st.text_area(
                 _t("Current prompt used as baseline"),
-                value=Path(proposal["baseline_prompt_path"]).read_text(
-                    encoding="utf-8"
-                ),
+                value=baseline_prompt,
                 height=420,
                 disabled=True,
                 key=f"prompt_baseline_{refinement.get('refinement_id', '')}",
@@ -1781,7 +1794,11 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
     _render_round_overview(state)
     task = _task_manager().snapshot(project.slug)
     if task and task.running:
-        _render_current_run_progress(project.slug, service)
+        _render_current_run_progress(
+            project.slug,
+            service,
+            widget_scope="snowball",
+        )
         st.info(_t("This run continues in the background. You can safely visit another page."))
         return
     latest = state["rounds"][-1]
@@ -2222,7 +2239,11 @@ def _render_corpus_analysis(
         "progress", {}
     )
     if (task and task.running) or progress_state.get("operation") == "Corpus analysis":
-        _render_current_run_progress(project.slug, service)
+        _render_current_run_progress(
+            project.slug,
+            service,
+            widget_scope="corpus_analysis",
+        )
     has_key = store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
     if st.button(
         _t("Analyze final corpus"),
@@ -2337,7 +2358,7 @@ def _render_round_overview(state: dict[str, Any]) -> None:
                 _t("Reviewed"): counts.get("reviewed", ""),
             }
         )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.dataframe(pd.DataFrame(rows, dtype=str), hide_index=True, width="stretch")
 
 
 def _render_literature_flow(state: dict[str, Any]) -> None:
@@ -2352,8 +2373,8 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
     st.subheader(_t("Literature flow"))
     st.caption(
         _t(
-            "Counts are saved after every completed stage. Enrichment stages add metadata "
-            "without removing papers."
+            "The diagram shows key discovery, screening, manual-addition, and audit stages. "
+            "Detailed stage counts remain available in the JSON download."
         )
     )
     for round_state, stages in rounds:
@@ -2663,6 +2684,8 @@ def _t(message: str, **values: object) -> str:
 def _render_current_run_progress(
     project_slug: str,
     service: PipelineService,
+    *,
+    widget_scope: str,
 ) -> None:
     service = PipelineService(_store())
     state = service.current_state_or_none(project_slug)
@@ -2750,7 +2773,7 @@ def _render_current_run_progress(
                 _t("Stopping..."),
                 icon=":material/progress_activity:",
                 disabled=True,
-                key=f"stop_run_{project_slug}",
+                key=f"stop_run_{widget_scope}_{project_slug}",
             )
             st.caption(
                 _t(
@@ -2761,7 +2784,7 @@ def _render_current_run_progress(
             _t("Stop run"),
             icon=":material/stop_circle:",
             type="secondary",
-            key=f"stop_run_{project_slug}",
+            key=f"stop_run_{widget_scope}_{project_slug}",
         ):
             _task_manager().cancel(project_slug)
             st.rerun()
@@ -2771,7 +2794,7 @@ def _render_current_run_progress(
             _t("Resume run") if can_resume_initial else _t("Run again"),
             icon=":material/replay:",
             type="primary",
-            key=f"restart_run_{project_slug}",
+            key=f"restart_run_{widget_scope}_{project_slug}",
         ):
             restarted = (
                 _task_manager().start(
@@ -2795,7 +2818,7 @@ def _render_current_run_progress(
             _t("Resume run"),
             icon=":material/replay:",
             type="primary",
-            key=f"resume_saved_run_{project_slug}",
+            key=f"resume_saved_run_{widget_scope}_{project_slug}",
         ):
             if _task_manager().start(
                 project_slug,
@@ -2820,7 +2843,9 @@ def _render_current_run_progress(
     elif progress_status == "cancelled":
         st.warning(_t("Run stopped. Completed files have been retained."))
 
-    marker_key = f"progress_status_{project_slug}_{state.get('run_id', '')}"
+    marker_key = (
+        f"progress_status_{widget_scope}_{project_slug}_{state.get('run_id', '')}"
+    )
     previous_status = st.session_state.get(marker_key)
     st.session_state[marker_key] = progress_status
     if previous_status == "running" and progress_status != "running":
