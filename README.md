@@ -24,7 +24,12 @@ flowchart TD
     G --> H
     H --> I["Human audit<br/>Include, related, exclude, or review later"]
     I -- "Add known papers" --> D
-    I --> J{"Run citation snowballing?"}
+    I --> P{"Refine the prompt from<br/>the completed initial audit?"}
+    P -- "Review and approve" --> R["Activate the human-approved prompt"]
+    P -- "Keep current prompt" --> J{"Run citation snowballing?"}
+    R --> J
+    R -. "Optional during first snowball round" .-> O["Replay initial AI exclusions<br/>Recovered papers return to human audit"]
+    O --> H
     J -- Yes --> K["Collect references and citing works<br/>from included and related papers"]
     K --> C
     J -- "No or converged" --> L["Export the final corpus<br/>with its complete audit trail"]
@@ -325,6 +330,23 @@ committed. Counts and the human-audit flow stage refresh immediately. The audit
 CSV can be downloaded at any time, and the paper reader below the table provides
 a larger abstract and AI-evidence view. Any audit change invalidates older final
 exports so Results cannot silently display a stale corpus.
+
+After every paper in the initial audit has a final decision, the **Prompt
+refinement** section can ask the configured AI model to compare the completed
+audit table with the current abstract-screening prompt. It produces a proposed
+complete prompt, a change summary, retained principles, new rules, and risks.
+The current prompt is not changed automatically: inspect both versions, edit the
+proposal if needed, and explicitly approve or reject it. If the audit table or
+baseline prompt changes before approval, the proposal becomes stale and must be
+generated again.
+
+An approved prompt enables an optional switch in **Snowball** to replay papers
+that the first abstract-level AI pass excluded and that never entered any human
+audit. Papers newly judged Include or Maybe, and failed API requests, enter the
+next Manual Review; papers excluded again remain outside the queue. Baseline,
+proposal, approved prompt, feedback rows, replay inputs, decisions, summaries,
+and reports are preserved in the project for auditability. This replay runs at
+most once for an approved proposal.
 
 #### 3.7 Snowball
 
@@ -707,6 +729,16 @@ Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank�
 每轮所有论文都需要人工最终决定，之后才能继续滚雪球。任何审阅变化都会使旧的最终导出失效，
 避免结果页继续显示过期文献集；audit CSV 可随时下载。
 
+首轮人工审阅全部完成后，页面中的 **Prompt refinement** 可以把当前摘要筛选 prompt 与已完成人工
+决定的审阅表交给 AI 比较，并生成一份完整的新 prompt 提案、修改摘要、保留原则、新规则和风险。
+系统不会自动启用它：用户需要对照旧版审查、按需编辑，再明确批准或拒绝。如果提案生成后人工审阅表
+或旧 prompt 又发生变化，旧提案会失效，必须重新生成。
+
+批准后，**滚雪球**页面会出现可选开关，用新 prompt 重新筛选首轮被摘要 AI 排除且从未进入任何人工
+审阅的论文。新判断为 Include、Maybe 或 API 失败的论文进入下一轮人工审阅；再次 Exclude 的论文不
+进入队列，但仍保留完整回放记录。旧 prompt、提案、批准版本、反馈表、回放输入、判断与报告都会随
+项目保存；同一批准版本最多回放一次。
+
 #### 3.7 滚雪球
 
 Include 和 Related 论文共同作为 seed。每轮收集 backward references 与 forward citations，
@@ -850,6 +882,16 @@ AI は推奨にすぎず、人の判定が最終結果です。各論文を Incl
 更新されます。全件を確定しないと次の snowball round へ進めません。監査変更後は古い最終出力が
 無効になるため、Results で再生成してください。
 
+初回監査の全件を確定した後、**Prompt refinement** で現在の抄録選別 prompt と人の判定表を AI に
+比較させ、完全な改訂 prompt、変更概要、維持する原則、新規ルール、リスクを提案できます。自動では
+有効化されません。旧版と提案を確認し、必要なら編集して、明示的に承認または却下します。提案後に
+監査表または基準 prompt が変わった場合、その提案は失効し、再生成が必要です。
+
+承認後は **Snowball** で、初回の抄録 AI が除外し、まだ人が一度も監査していない論文だけを新しい
+prompt で再選別できます。Include、Maybe、または API 失敗は次の Manual review に入り、再度
+Exclude された論文は queue に入りません。基準・提案・承認 prompt、feedback、replay 入力、判定、
+report は監査証跡として保存され、同じ承認版の replay は一度だけ実行されます。
+
 #### 3.7 Snowball
 
 Include と Related を seed とし、後方参考文献と前方引用を取得します。既査読文献と重複排除した後、
@@ -963,6 +1005,16 @@ Later는 임시 보류에만 사용합니다. Related는 repair, explainability,
 문헌과 구분해 보존할 때 사용할 수 있습니다. 셀 편집을 확정하면 결정과 메모가 자동 저장되고 통계와
 흐름도 즉시 갱신됩니다. 모든 논문을 확정해야 다음 snowball round로 진행할 수 있습니다. audit이
 바뀌면 이전 최종 결과는 무효화되므로 Results에서 다시 생성해야 합니다.
+
+초기 audit의 모든 결정을 확정한 뒤 **Prompt refinement**에서 현재 초록 선별 prompt와 사람의 결정표를
+AI가 비교해 완전한 개정 prompt, 변경 요약, 유지 원칙, 새 규칙과 위험을 제안하게 할 수 있습니다. 제안은
+자동 적용되지 않습니다. 기존 prompt와 비교하고 필요하면 편집한 뒤 명시적으로 승인하거나 거절해야
+합니다. 제안 후 audit 표나 기준 prompt가 변경되면 제안은 만료되어 다시 생성해야 합니다.
+
+승인 후 **Snowball**에서 초기 초록 AI가 제외했고 아직 한 번도 사람이 검토하지 않은 논문만 새 prompt로
+다시 선별할 수 있습니다. Include, Maybe 또는 API 실패는 다음 Manual review에 들어가고, 다시 Exclude된
+논문은 queue에 들어가지 않습니다. 기준·제안·승인 prompt, feedback, replay 입력, 결정과 report는 감사
+기록으로 저장되며 같은 승인 버전은 한 번만 replay됩니다.
 
 #### 3.7 Snowball
 

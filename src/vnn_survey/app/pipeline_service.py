@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import math
@@ -22,6 +23,7 @@ from vnn_survey.app.audit import (
     create_audit_queue,
     create_manual_recommendations,
     load_audit,
+    paper_key,
     read_csv,
     summarize_audit,
     update_audit_rows,
@@ -31,7 +33,7 @@ from vnn_survey.app.manual_papers import ManualPaperStore
 from vnn_survey.app.project_store import ProjectStore
 from vnn_survey.app.run_flow import build_flow_svg, flow_summary_payload, record_flow_stage
 from vnn_survey.app.task_manager import TaskCancelled, raise_if_cancelled
-from vnn_survey.config import load_config
+from vnn_survey.config import SurveyConfig, load_config
 from vnn_survey.enrichment import enrich_candidates, write_enrichment_summary
 from vnn_survey.export import write_csv, write_jsonl
 from vnn_survey.llm_screening import llm_screen_candidates, write_llm_screening_summary
@@ -43,6 +45,10 @@ from vnn_survey.pipeline import (
     save_collection,
     summarize,
 )
+from vnn_survey.prompt_refinement import (
+    generate_prompt_refinement as build_prompt_refinement,
+)
+from vnn_survey.prompt_refinement import load_prompt_refinement
 from vnn_survey.screening import screen_candidates
 from vnn_survey.snowballing import (
     export_seed_papers_from_csv,
@@ -84,6 +90,7 @@ CORPUS_ANALYSIS_STAGES = [
 ]
 AI_REVIEW_STAGES = ["AI screening", "Recommendation summary", "Audit queue"]
 MANUAL_REVIEW_STAGES = ["Review preparation", "Audit queue"]
+PROMPT_REFINEMENT_STAGES = ["Learning from manual audit", "Prompt proposal"]
 SNOWBALL_STAGES = [
     "Citation snowballing",
     "Rule screening",
@@ -1188,6 +1195,7 @@ class PipelineService:
         core_online: bool = True,
         use_title_llm: bool = False,
         title_batch_size: int = 100,
+        replay_initial_exclusions: bool = False,
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
@@ -1195,6 +1203,22 @@ class PipelineService:
             "OPENAI_API_KEY"
         ):
             raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
+        if replay_initial_exclusions:
+            refinement = state.get("prompt_refinement", {})
+            if refinement.get("status") != "approved":
+                raise RuntimeError(
+                    "Approve a refined screening prompt before replaying AI exclusions."
+                )
+            if refinement.get("replay_status") == "completed":
+                raise RuntimeError(
+                    "The initial AI exclusions were already replayed with this prompt."
+                )
+            if not self.store.has_api_key(project_slug) and not os.environ.get(
+                "OPENAI_API_KEY"
+            ):
+                raise RuntimeError(
+                    "Save or provide an OpenAI API key before replaying AI exclusions."
+                )
         completed_rounds = [item for item in state["rounds"] if item.get("files", {}).get("audit")]
         if not completed_rounds:
             raise RuntimeError("Complete the initial review before snowballing.")
@@ -1226,6 +1250,7 @@ class PipelineService:
             {
                 "title_llm_enabled": use_title_llm,
                 "title_llm_batch_size": title_batch_size,
+                "replay_initial_exclusions": replay_initial_exclusions,
             }
         )
         self._save_state(project_slug, state)
@@ -1239,7 +1264,10 @@ class PipelineService:
             state,
             operation="Citation snowballing",
             heading="Running citation snowballing",
-            stages=_with_title_screening_stage(SNOWBALL_STAGES, use_title_llm),
+            stages=_with_prompt_replay_stage(
+                _with_title_screening_stage(SNOWBALL_STAGES, use_title_llm),
+                replay_initial_exclusions,
+            ),
             callback=progress,
             paper_count=_csv_row_count(previous_pool),
         )
@@ -1422,6 +1450,33 @@ class PipelineService:
                 },
             )
 
+            replay_files: dict[str, str] = {}
+            replay_counts: dict[str, int] = {}
+            if replay_initial_exclusions:
+                _notify(
+                    tracked_progress,
+                    "Re-screen initial AI exclusions",
+                    "Applying the approved prompt to initial AI exclusions.",
+                )
+                replay_files, replay_counts = self._replay_initial_ai_exclusions(
+                    project_slug=project_slug,
+                    state=state,
+                    round_index=round_index,
+                    enriched_path=enriched_path,
+                    config=config,
+                    processed_dir=processed_dir,
+                    progress=tracked_progress,
+                )
+                record_flow_stage(
+                    round_state,
+                    key="prompt_replay",
+                    label="Re-screen initial AI exclusions",
+                    input_count=replay_counts["replayed"],
+                    retained_count=replay_counts["recovered"],
+                    excluded_count=replay_counts["reexcluded"],
+                    details={"failed": replay_counts["failed"]},
+                )
+
             round_state["status"] = "discovery_complete"
             round_state["files"] = {
                 "snowballed": str(snowball_path),
@@ -1434,6 +1489,7 @@ class PipelineService:
                 "venues": str(venue_path),
                 "enriched": str(enriched_path),
                 "seeds": str(seed_path),
+                **replay_files,
             }
             round_state["counts"].update(
                 {
@@ -1453,6 +1509,7 @@ class PipelineService:
                         0,
                     ),
                     "abstract_cache_hits": enrichment_result.summary.cache_hits,
+                    **replay_counts,
                 }
             )
             state["status"] = "awaiting_ai_or_review"
@@ -1463,7 +1520,7 @@ class PipelineService:
                 progress,
                 stage="Snowball discovery complete",
                 message="New records are ready for AI screening or review.",
-                paper_count=snowball_result.summary.output_rows,
+                paper_count=_csv_row_count(enriched_path),
             )
             return state
         except TaskCancelled:
@@ -1472,6 +1529,159 @@ class PipelineService:
         except Exception as exc:
             self._mark_failed(project_slug, state, round_state, exc)
             raise
+
+    def _replay_initial_ai_exclusions(
+        self,
+        *,
+        project_slug: str,
+        state: dict[str, Any],
+        round_index: int,
+        enriched_path: Path,
+        config: SurveyConfig,
+        processed_dir: Path,
+        progress: ProgressCallback | None,
+    ) -> tuple[dict[str, str], dict[str, int]]:
+        refinement = state.get("prompt_refinement", {})
+        approved_value = refinement.get("approved_prompt_path")
+        if not approved_value or not Path(approved_value).exists():
+            raise RuntimeError("The approved screening prompt file is unavailable.")
+        initial_exclusions = _initial_ai_exclusion_rows(state)
+        if not initial_exclusions:
+            refinement.update(
+                {
+                    "replay_status": "completed",
+                    "replay_round": round_index,
+                    "replayed_at": _now(),
+                    "replayed": 0,
+                    "recovered": 0,
+                    "reexcluded": 0,
+                    "failed": 0,
+                }
+            )
+            return {}, {
+                "replayed": 0,
+                "recovered": 0,
+                "reexcluded": 0,
+                "failed": 0,
+            }
+
+        fieldnames, current_rows = read_csv(enriched_path)
+        current_by_key = {paper_key(row): row for row in current_rows}
+        replay_input_rows = [
+            dict(current_by_key.get(paper_key(row), row))
+            for row in initial_exclusions
+        ]
+        revision_id = str(refinement.get("refinement_id") or "approved")
+        prefix = f"prompt_replay_round_{round_index}"
+        input_path = processed_dir / f"{prefix}_input.csv"
+        screened_path = processed_dir / f"{prefix}_screened.csv"
+        recommendations_path = processed_dir / f"{prefix}_recommendations.csv"
+        report_path = processed_dir / f"{prefix}_report.md"
+        final_summary_path = processed_dir / f"{prefix}_summary.json"
+        request_summary_path = processed_dir / f"{prefix}_request_summary.json"
+        input_fields = list(
+            dict.fromkeys(key for row in replay_input_rows for key in row)
+        )
+        write_audit_csv(input_path, replay_input_rows, input_fields)
+        replay_config = replace(
+            config.llm_screening,
+            system_prompt_path=Path(approved_value),
+            prompt_version=f"prompt-refinement-{revision_id}",
+        )
+        decisions = {
+            str(row.get("auto_screening_decision") or "")
+            for row in replay_input_rows
+        }
+        llm_result = llm_screen_candidates(
+            input_path,
+            screened_path,
+            replay_config,
+            decisions=decisions,
+            overwrite=True,
+            progress_callback=_item_progress(
+                progress,
+                "Re-screen initial AI exclusions",
+                "Applying the approved prompt to initial AI exclusions.",
+            ),
+        )
+        write_llm_screening_summary(llm_result.summary, request_summary_path)
+        recommendation_result = summarize_llm_screening(
+            screened_path,
+            report_path,
+            recommendations_path,
+            final_summary_path,
+        )
+
+        recovered = 0
+        reexcluded = 0
+        failed = 0
+        current_indexes = {
+            paper_key(row): index for index, row in enumerate(current_rows)
+        }
+        for row in recommendation_result.rows:
+            is_failed = row.get("llm_status") == "failed"
+            is_reexcluded = row.get("llm_decision") == "exclude" and not is_failed
+            replay_decision = "reexcluded" if is_reexcluded else "recovered"
+            if is_reexcluded:
+                row.update(
+                    {
+                        "final_recommendation": "auto_exclude",
+                        "final_priority": "8",
+                        "final_reason": (
+                            "The approved refined prompt excluded this paper again."
+                        ),
+                    }
+                )
+            row.update(
+                {
+                    "auto_screening_decision": (
+                        "exclude" if is_reexcluded else "needs_review"
+                    ),
+                    "prompt_replay_decision": replay_decision,
+                    "prompt_refinement_id": revision_id,
+                }
+            )
+            failed += int(is_failed)
+            reexcluded += int(is_reexcluded)
+            recovered += int(not is_reexcluded)
+            key = paper_key(row)
+            match_index = current_indexes.get(key)
+            if match_index is None:
+                if is_reexcluded:
+                    continue
+                current_indexes[key] = len(current_rows)
+                current_rows.append(dict(row))
+                continue
+            current_rows[match_index].update(row)
+
+        output_fields = list(
+            dict.fromkeys(
+                [*fieldnames, *(key for row in current_rows for key in row)]
+            )
+        )
+        write_audit_csv(enriched_path, current_rows, output_fields)
+        counts = {
+            "replayed": len(replay_input_rows),
+            "recovered": recovered,
+            "reexcluded": reexcluded,
+            "failed": failed,
+        }
+        files = {
+            "prompt_replay_input": str(input_path),
+            "prompt_replay_screened": str(screened_path),
+            "prompt_replay_recommendations": str(recommendations_path),
+            "prompt_replay_report": str(report_path),
+        }
+        refinement.update(
+            {
+                "replay_status": "completed",
+                "replay_round": round_index,
+                "replayed_at": _now(),
+                **counts,
+                "replay_files": files,
+            }
+        )
+        return files, counts
 
     def _title_prescreen(
         self,
@@ -1562,6 +1772,224 @@ class PipelineService:
         _invalidate_derived_outputs(state)
         self._save_state(project_slug, state)
         return summary
+
+    def prompt_refinement_overview(self, project_slug: str) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        initial_round = next(
+            (
+                item
+                for item in state.get("rounds", [])
+                if int(item.get("index", -1)) == 0
+                and item.get("files", {}).get("audit")
+            ),
+            None,
+        )
+        if initial_round is None:
+            return {
+                "available": False,
+                "audit_total": 0,
+                "unreviewed": 0,
+                "initial_ai_exclusions": 0,
+                "refinement": state.get("prompt_refinement", {}),
+            }
+        _, _, summary = load_audit(Path(initial_round["files"]["audit"]))
+        return {
+            "available": True,
+            "audit_total": summary.total,
+            "unreviewed": summary.unreviewed,
+            "initial_ai_exclusions": len(_initial_ai_exclusion_rows(state)),
+            "refinement": state.get("prompt_refinement", {}),
+        }
+
+    def generate_prompt_refinement(
+        self,
+        project_slug: str,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        initial_round = next(
+            (
+                item
+                for item in state.get("rounds", [])
+                if int(item.get("index", -1)) == 0
+                and item.get("files", {}).get("audit")
+            ),
+            None,
+        )
+        if initial_round is None:
+            raise RuntimeError("Complete the initial manual review before refining the prompt.")
+        audit_path = Path(initial_round["files"]["audit"])
+        _, audit_rows, audit_summary = load_audit(audit_path)
+        if audit_summary.unreviewed:
+            raise RuntimeError(
+                "Finish every paper in the initial audit before refining the prompt."
+            )
+        settings = self.store.load_project(project_slug)
+        api_key = self.store.read_api_key(project_slug) or os.environ.get(
+            "OPENAI_API_KEY", ""
+        )
+        client = OpenAIResearchClient(
+            base_url=settings.llm_base_url,
+            api_key=api_key,
+            model=settings.llm_model,
+        )
+        prompt_path = self.store.system_prompt_path(project_slug)
+        old_prompt = prompt_path.read_text(encoding="utf-8")
+        refinement_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        output_dir = (
+            self.store.project_dir(project_slug)
+            / "configs"
+            / "prompts"
+            / "refinements"
+            / refinement_id
+        )
+        tracked_progress = self._begin_progress(
+            project_slug,
+            state,
+            operation="Prompt refinement",
+            heading="Learning from the initial manual audit",
+            stages=PROMPT_REFINEMENT_STAGES,
+            callback=progress,
+            paper_count=len(audit_rows),
+        )
+
+        try:
+            _notify(
+                tracked_progress,
+                "Learning from manual audit",
+                "Comparing AI recommendations with the completed human decisions.",
+                len(audit_rows),
+                len(audit_rows),
+            )
+            result = build_prompt_refinement(
+                client=client,
+                old_prompt=old_prompt,
+                audit_rows=audit_rows,
+                research_question=settings.research_question,
+                scope_description=settings.scope_description,
+                inclusion_criteria=settings.inclusion_criteria,
+                exclusion_criteria=settings.exclusion_criteria,
+                output_dir=output_dir,
+            )
+            _notify(
+                tracked_progress,
+                "Prompt proposal",
+                "Saving the proposed prompt for human approval.",
+            )
+            state["prompt_refinement"] = {
+                "refinement_id": refinement_id,
+                "status": "proposed",
+                "source_round": 0,
+                "model": settings.llm_model,
+                "generated_at": _now(),
+                "audit_path": str(audit_path),
+                "audit_sha256": _file_sha256(audit_path),
+                "baseline_prompt_sha256": _text_sha256(old_prompt.strip()),
+                "rows_total": result.rows_total,
+                "rows_used": result.rows_used,
+                "proposal_path": str(result.proposal_path),
+                "baseline_prompt_path": str(result.baseline_prompt_path),
+                "proposed_prompt_path": str(result.proposed_prompt_path),
+                "feedback_path": str(result.feedback_path),
+                "change_summary": result.change_summary,
+                "replay_status": "not_approved",
+            }
+            self._save_state(project_slug, state)
+            self._complete_progress(
+                project_slug,
+                state,
+                progress,
+                stage="Prompt proposal ready",
+                message="Review and approve the proposed screening prompt.",
+                paper_count=len(audit_rows),
+            )
+            return state
+        except TaskCancelled:
+            self._mark_progress_cancelled(project_slug, state)
+            return state
+        except Exception as exc:
+            self._mark_progress_failed(project_slug, state, exc)
+            raise
+
+    def load_prompt_refinement_proposal(self, project_slug: str) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        proposal_value = state.get("prompt_refinement", {}).get("proposal_path")
+        if not proposal_value:
+            raise RuntimeError("No prompt refinement proposal is available.")
+        return load_prompt_refinement(Path(proposal_value))
+
+    def approve_prompt_refinement(
+        self,
+        project_slug: str,
+        proposed_prompt: str,
+    ) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        refinement = state.get("prompt_refinement", {})
+        if refinement.get("status") != "proposed":
+            raise RuntimeError("No pending prompt proposal is available for approval.")
+        audit_path = Path(refinement["audit_path"])
+        if _file_sha256(audit_path) != refinement.get("audit_sha256"):
+            raise RuntimeError(
+                "The initial audit changed after this proposal was generated. "
+                "Generate a new proposal."
+            )
+        current_prompt = self.store.system_prompt_path(project_slug).read_text(
+            encoding="utf-8"
+        )
+        if _text_sha256(current_prompt.strip()) != refinement.get(
+            "baseline_prompt_sha256"
+        ):
+            raise RuntimeError(
+                "The screening prompt changed after this proposal was generated. "
+                "Generate a new proposal."
+            )
+        approved_prompt = proposed_prompt.strip()
+        if not approved_prompt:
+            raise ValueError("The system prompt cannot be empty.")
+        approved_path = Path(refinement["proposal_path"]).with_name(
+            "approved_prompt.txt"
+        )
+        approved_path.write_text(approved_prompt + "\n", encoding="utf-8")
+        self.store.save_system_prompt(project_slug, approved_prompt)
+        refinement.update(
+            {
+                "status": "approved",
+                "approved_at": _now(),
+                "approved_prompt_path": str(approved_path),
+                "approved_prompt_sha256": _text_sha256(approved_prompt),
+                "replay_status": "pending",
+            }
+        )
+        self._save_state(project_slug, state)
+        return state
+
+    def reject_prompt_refinement(self, project_slug: str) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        refinement = state.get("prompt_refinement", {})
+        if refinement.get("status") != "proposed":
+            raise RuntimeError("No pending prompt proposal is available for rejection.")
+        refinement.update(
+            {
+                "status": "rejected",
+                "rejected_at": _now(),
+                "replay_status": "not_approved",
+            }
+        )
+        self._save_state(project_slug, state)
+        return state
+
+    def prompt_replay_overview(self, project_slug: str) -> dict[str, Any]:
+        state = self.load_current_state(project_slug)
+        refinement = state.get("prompt_refinement", {})
+        exclusions = _initial_ai_exclusion_rows(state)
+        return {
+            "approved": refinement.get("status") == "approved",
+            "refinement_id": refinement.get("refinement_id", ""),
+            "replay_status": refinement.get("replay_status", "not_available"),
+            "eligible": len(exclusions),
+            "replay_round": refinement.get("replay_round"),
+        }
 
     def add_manual_paper(
         self,
@@ -2386,6 +2814,49 @@ def _manual_audit_row(record: PaperRecord, note: str) -> dict[str, str]:
     return row
 
 
+def _initial_ai_exclusion_rows(state: dict[str, Any]) -> list[dict[str, str]]:
+    initial_round = next(
+        (
+            item
+            for item in state.get("rounds", [])
+            if int(item.get("index", -1)) == 0
+        ),
+        None,
+    )
+    if initial_round is None:
+        return []
+    llm_value = initial_round.get("files", {}).get("llm_screened")
+    if not llm_value or not Path(llm_value).exists():
+        return []
+    reviewed_keys: set[str] = set()
+    for round_state in state.get("rounds", []):
+        audit_value = round_state.get("files", {}).get("audit")
+        if not audit_value or not Path(audit_value).exists():
+            continue
+        _, audit_rows = read_csv(Path(audit_value))
+        reviewed_keys.update(paper_key(row) for row in audit_rows)
+    _, llm_rows = read_csv(Path(llm_value))
+    exclusions: dict[str, dict[str, str]] = {}
+    for row in llm_rows:
+        key = paper_key(row)
+        if row.get("llm_decision") != "exclude" or key in reviewed_keys:
+            continue
+        exclusions.setdefault(key, row)
+    return list(exclusions.values())
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _manual_enrichment_input(record: PaperRecord) -> dict[str, str]:
     row = {
         str(key): "" if value is None else str(value)
@@ -2695,6 +3166,13 @@ def _with_title_screening_stage(stages: list[str], enabled: bool) -> list[str]:
     if enabled:
         rule_index = values.index("Rule screening")
         values.insert(rule_index + 1, "AI title screening")
+    return values
+
+
+def _with_prompt_replay_stage(stages: list[str], enabled: bool) -> list[str]:
+    values = list(stages)
+    if enabled:
+        values.append("Re-screen initial AI exclusions")
     return values
 
 

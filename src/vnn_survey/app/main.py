@@ -1552,6 +1552,9 @@ def _render_manual_review(
         icon=":material/download:",
     )
 
+    if round_index == 0:
+        _render_prompt_refinement(store, service, project)
+
     st.divider()
     st.subheader(_t("Paper reader"))
     if frame.empty:
@@ -1589,6 +1592,181 @@ def _render_manual_review(
         embedded=True,
         target_round_index=round_index,
     )
+
+
+def _render_prompt_refinement(
+    store: ProjectStore,
+    service: PipelineService,
+    project: ProjectSettings,
+) -> None:
+    st.divider()
+    st.subheader(_t("Refine screening prompt from human decisions"))
+    st.write(
+        _t(
+            "After the initial audit is complete, AI can compare the human decisions with "
+            "the current screening prompt and propose a revision. The active prompt changes "
+            "only after human approval."
+        )
+    )
+    overview = service.prompt_refinement_overview(project.slug)
+    metrics = st.columns(3)
+    metrics[0].metric(_t("Audited papers"), overview["audit_total"])
+    metrics[1].metric(_t("Decisions remaining"), overview["unreviewed"])
+    metrics[2].metric(
+        _t("Initial AI exclusions eligible for replay"),
+        overview["initial_ai_exclusions"],
+    )
+    if not overview["available"]:
+        st.info(_t("Create and complete the initial review queue first."))
+        return
+    if overview["unreviewed"]:
+        st.info(
+            _t(
+                "Finish all {count} initial manual decisions before generating a prompt "
+                "proposal.",
+                count=overview["unreviewed"],
+            )
+        )
+        return
+
+    task = _task_manager().snapshot(project.slug)
+    if task and task.running and task.operation == "prompt_refinement":
+        _render_current_run_progress(project.slug, service)
+        return
+    if task and task.error and task.operation == "prompt_refinement":
+        st.error(_t("Prompt refinement failed: {error}", error=_runtime_text(task.error)))
+
+    refinement = overview.get("refinement", {})
+    status = str(refinement.get("status") or "not_generated")
+    has_api_key = store.has_api_key(project.slug) or bool(
+        os.environ.get("OPENAI_API_KEY")
+    )
+    if status == "proposed":
+        try:
+            proposal = service.load_prompt_refinement_proposal(project.slug)
+        except (OSError, RuntimeError, ValueError) as exc:
+            st.error(_runtime_text(str(exc)))
+            return
+        st.warning(_t("This proposal is waiting for human approval."))
+        st.markdown(f"**{_t('Change summary')}**")
+        st.write(proposal.get("change_summary") or _t("No summary was provided."))
+        detail_columns = st.columns(3)
+        _render_prompt_change_list(
+            detail_columns[0],
+            _t("Retained principles"),
+            proposal.get("retained_principles", []),
+        )
+        _render_prompt_change_list(
+            detail_columns[1],
+            _t("New rules"),
+            proposal.get("new_rules", []),
+        )
+        _render_prompt_change_list(
+            detail_columns[2],
+            _t("Risks to inspect"),
+            proposal.get("risks", []),
+        )
+        st.caption(
+            _t(
+                "The proposal used {used} of {total} audited rows.",
+                used=proposal.get("rows_used", 0),
+                total=proposal.get("rows_total", 0),
+            )
+        )
+        prompt_columns = st.columns(2)
+        with prompt_columns[0]:
+            st.text_area(
+                _t("Current prompt used as baseline"),
+                value=Path(proposal["baseline_prompt_path"]).read_text(
+                    encoding="utf-8"
+                ),
+                height=420,
+                disabled=True,
+                key=f"prompt_baseline_{refinement.get('refinement_id', '')}",
+            )
+        with prompt_columns[1]:
+            proposed_prompt = st.text_area(
+                _t("Proposed prompt (editable before approval)"),
+                value=str(proposal.get("revised_prompt") or ""),
+                height=420,
+                key=f"prompt_proposal_{refinement.get('refinement_id', '')}",
+            )
+        approve_col, reject_col = st.columns(2)
+        with approve_col:
+            if st.button(
+                _t("Approve and use this prompt"),
+                type="primary",
+                icon=":material/check:",
+                width="stretch",
+            ):
+                try:
+                    service.approve_prompt_refinement(project.slug, proposed_prompt)
+                    st.rerun()
+                except (OSError, RuntimeError, ValueError) as exc:
+                    st.error(_runtime_text(str(exc)))
+        with reject_col:
+            if st.button(
+                _t("Reject proposal"),
+                icon=":material/close:",
+                width="stretch",
+            ):
+                try:
+                    service.reject_prompt_refinement(project.slug)
+                    st.rerun()
+                except RuntimeError as exc:
+                    st.error(_runtime_text(str(exc)))
+        return
+
+    if status == "approved":
+        st.success(
+            _t(
+                "The revised prompt is approved. Initial AI exclusions can be replayed "
+                "during snowballing."
+            )
+        )
+        st.caption(
+            _t(
+                "Replay status: {status}",
+                status=_state_label(str(refinement.get("replay_status") or "pending")),
+            )
+        )
+        approved_value = refinement.get("approved_prompt_path")
+        if approved_value and Path(approved_value).exists():
+            with st.expander(_t("View approved prompt")):
+                st.code(Path(approved_value).read_text(encoding="utf-8"), language="text")
+        return
+
+    if status == "rejected":
+        st.info(_t("The previous prompt proposal was rejected."))
+    if not has_api_key:
+        st.warning(_t("Add an API key on the AI settings page before continuing."))
+    if st.button(
+        _t("Generate prompt proposal"),
+        type="primary",
+        icon=":material/auto_awesome:",
+        disabled=not has_api_key or bool(task and task.running),
+    ):
+        started = _task_manager().start(
+            project.slug,
+            "prompt_refinement",
+            service.generate_prompt_refinement,
+            project.slug,
+        )
+        if started:
+            st.rerun()
+        else:
+            st.warning(_t("A pipeline task is already running for this project."))
+
+
+def _render_prompt_change_list(container, title: str, values: object) -> None:
+    with container:
+        st.markdown(f"**{title}**")
+        items = values if isinstance(values, list) else []
+        if not items:
+            st.caption(_t("None reported."))
+            return
+        for item in items:
+            st.markdown(f"- {item}")
 
 
 def _render_snowball(service: PipelineService, project: ProjectSettings) -> None:
@@ -1679,10 +1857,45 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             disabled=not use_title_llm,
             key=f"snowball_title_batch_{state['run_id']}",
         )
+    replay_overview = service.prompt_replay_overview(project.slug)
+    replay_initial_exclusions = False
+    if replay_overview["replay_status"] == "completed":
+        st.success(
+            _t(
+                "Initial AI exclusions were replayed in snowball round {round_index}.",
+                round_index=replay_overview.get("replay_round", ""),
+            )
+        )
+    elif replay_overview["approved"] and replay_overview["eligible"]:
+        replay_initial_exclusions = st.toggle(
+            _t("Re-screen initial AI exclusions with the approved prompt"),
+            value=True,
+            disabled=not has_api_key,
+            key=f"snowball_prompt_replay_{state['run_id']}",
+            help=_t(
+                "Papers recovered as include, maybe, or failed enter the next manual review. "
+                "Papers excluded again remain outside the review queue."
+            ),
+        )
+        st.caption(
+            _t(
+                "{count} initial AI exclusions have never received a human decision.",
+                count=replay_overview["eligible"],
+            )
+        )
+    elif replay_overview["eligible"]:
+        st.info(
+            _t(
+                "Approve a refined prompt in the initial Manual Review to re-screen "
+                "{count} initial AI exclusions.",
+                count=replay_overview["eligible"],
+            )
+        )
     if st.button(
         _t("Start next snowball round"),
         type="primary",
-        disabled=summary.unreviewed > 0,
+        disabled=summary.unreviewed > 0
+        or (replay_initial_exclusions and not has_api_key),
         icon=":material/account_tree:",
     ):
         started = _task_manager().start(
@@ -1696,6 +1909,7 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             core_online=core_online,
             use_title_llm=use_title_llm,
             title_batch_size=int(title_batch_size),
+            replay_initial_exclusions=replay_initial_exclusions,
         )
         if started:
             st.rerun()
