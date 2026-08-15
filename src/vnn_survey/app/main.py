@@ -2397,13 +2397,28 @@ def _merge_editor_identity(original: pd.DataFrame, edited: pd.DataFrame) -> list
     return updates
 
 
-def _paper_metadata(row: dict[str, str]) -> str:
+def _paper_metadata(row: dict[str, Any]) -> str:
+    def display_text(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            if bool(pd.isna(value)):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return str(value).strip()
+
+    authors = display_text(row.get("authors"))
+    year = display_text(row.get("year"))
+    venue = display_text(row.get("venue"))
+    core_rank = display_text(row.get("core_rank"))
+    impact_factor = display_text(row.get("impact_factor"))
     values = [
-        row.get("authors", ""),
-        row.get("year", ""),
-        row.get("venue", ""),
-        f"CORE {row.get('core_rank')}" if row.get("core_rank") else "",
-        f"IF {row.get('impact_factor')}" if row.get("impact_factor") else "",
+        authors,
+        year,
+        venue,
+        f"CORE {core_rank}" if core_rank else "",
+        f"IF {impact_factor}" if impact_factor else "",
     ]
     return " · ".join(value for value in values if value)
 
