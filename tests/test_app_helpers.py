@@ -1,13 +1,28 @@
 from math import nan
 
 import pandas as pd
+import streamlit as st
 
 from vnn_survey.app.main import (
     _audit_rows_changed,
+    _download_button,
     _has_known_impact_factor,
     _impact_factor_text,
     _paper_metadata,
 )
+
+
+def test_download_button_does_not_rerun_the_app(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_download_button(*_args, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(st, "download_button", fake_download_button)
+
+    assert _download_button("Download", data=b"content", on_click="rerun")
+    assert captured["on_click"] == "ignore"
 
 
 def test_paper_metadata_formats_numeric_year_and_metrics() -> None:

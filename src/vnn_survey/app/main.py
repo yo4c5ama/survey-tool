@@ -327,7 +327,7 @@ def _render_backup_restore(
                 )
             )
             with backup_path.open("rb") as handle:
-                st.download_button(
+                _download_button(
                     _t("Download backup"),
                     data=handle,
                     file_name=backup_path.name,
@@ -1875,7 +1875,7 @@ def _render_manual_review(
 
     download_columns = st.columns(2)
     with download_columns[0]:
-        st.download_button(
+        _download_button(
             _t("Download this audit CSV"),
             data=audit_path.read_bytes(),
             file_name=audit_path.name,
@@ -2052,7 +2052,7 @@ def _render_prompt_refinement_content(
         )
         feedback_csv = refinement.get("feedback_csv_path")
         if feedback_csv and Path(feedback_csv).exists():
-            st.download_button(
+            _download_button(
                 _t("Download prompt feedback CSV"),
                 data=Path(feedback_csv).read_bytes(),
                 file_name=Path(feedback_csv).name,
@@ -2264,7 +2264,7 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
                         hide_index=True,
                         width="stretch",
                     )
-                    st.download_button(
+                    _download_button(
                         _t("Download seed coverage report"),
                         data=Path(coverage_path_value).read_bytes(),
                         file_name=Path(coverage_path_value).name,
@@ -2871,7 +2871,7 @@ def _render_result_downloads(
 ) -> None:
     download_columns = st.columns(3)
     with download_columns[0]:
-        st.download_button(
+        _download_button(
             _t("Included papers CSV"),
             data=included_path.read_bytes(),
             file_name=included_path.name,
@@ -2879,7 +2879,7 @@ def _render_result_downloads(
             width="stretch",
         )
     with download_columns[1]:
-        st.download_button(
+        _download_button(
             _t("Complete audit CSV"),
             data=audit_path.read_bytes(),
             file_name=audit_path.name,
@@ -2887,7 +2887,7 @@ def _render_result_downloads(
             width="stretch",
         )
     with download_columns[2]:
-        st.download_button(
+        _download_button(
             _t("Final report"),
             data=report_path.read_bytes(),
             file_name=report_path.name,
@@ -3145,7 +3145,7 @@ def _render_corpus_analysis(
     )
     download_columns = st.columns(3)
     with download_columns[0]:
-        st.download_button(
+        _download_button(
             _t("Taxonomy JSON"),
             data=taxonomy_path.read_bytes(),
             file_name=taxonomy_path.name,
@@ -3153,7 +3153,7 @@ def _render_corpus_analysis(
             width="stretch",
         )
     with download_columns[1]:
-        st.download_button(
+        _download_button(
             _t("Classifications CSV"),
             data=classifications_path.read_bytes(),
             file_name=classifications_path.name,
@@ -3161,7 +3161,7 @@ def _render_corpus_analysis(
             width="stretch",
         )
     with download_columns[2]:
-        st.download_button(
+        _download_button(
             _t("Analysis report"),
             data=report_path.read_bytes() if report_path.exists() else b"",
             file_name=report_path.name or "report.md",
@@ -3283,7 +3283,7 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
 
     download_columns = st.columns(2)
     with download_columns[0]:
-        st.download_button(
+        _download_button(
             _t("Download flow diagram"),
             data=build_flow_svg(state),
             file_name=f"{state.get('run_id', 'run')}_flow_diagram.svg",
@@ -3292,7 +3292,7 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
             width="stretch",
         )
     with download_columns[1]:
-        st.download_button(
+        _download_button(
             _t("Download flow counts"),
             data=json.dumps(flow_summary_payload(state), ensure_ascii=False, indent=2),
             file_name=f"{state.get('run_id', 'run')}_flow_summary.json",
@@ -3674,6 +3674,11 @@ def _render_current_run_progress_content(
         st.rerun()
 
 
+def _download_button(*args: Any, **kwargs: Any) -> bool:
+    kwargs["on_click"] = "ignore"
+    return st.download_button(*args, **kwargs)
+
+
 def _render_run_log_download(
     service: PipelineService,
     project_slug: str,
@@ -3684,7 +3689,7 @@ def _render_run_log_download(
         log_path = service.run_log_path(project_slug)
     except (FileNotFoundError, OSError, ValueError):
         return
-    st.download_button(
+    _download_button(
         _t("Export run log"),
         data=log_path.read_bytes(),
         file_name=f"{log_path.parent.name}_run_log.json",
