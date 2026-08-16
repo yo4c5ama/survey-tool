@@ -20,6 +20,7 @@ def test_app_opens_project_creation(monkeypatch, tmp_path: Path) -> None:
     assert any(title.value == "SurveyFlow" for title in app.title)
     assert any(item.label == "Backup and restore" for item in app.expander)
     assert any(item.key == "project_backup_upload" for item in app.file_uploader)
+    assert any("yoac" in item.value and "Codex" in item.value for item in app.markdown)
 
 
 def test_app_switches_between_all_interface_languages(monkeypatch, tmp_path: Path) -> None:
@@ -96,7 +97,7 @@ def test_manual_review_allows_paper_additions_before_discovery(
 
     assert not app.exception
     assert any(title.value == "Manual review" for title in app.title)
-    assert any(header.value == "Add papers" for header in app.subheader)
+    assert any(item.label == "Add papers" for item in app.expander)
     assert any(
         item.key == "manual_lookup_title_manual-workspace" for item in app.text_input
     )
@@ -167,7 +168,7 @@ def test_manual_review_embeds_live_paper_addition_workspace(
     app.run(timeout=20)
 
     assert not app.exception
-    assert any(header.value == "Add papers" for header in app.subheader)
+    assert any(item.label == "Add papers" for item in app.expander)
     assert any(
         item.key == "manual_lookup_title_integrated-review" for item in app.text_input
     )
@@ -176,6 +177,98 @@ def test_manual_review_embeds_live_paper_addition_workspace(
         for item in app.button
     )
     assert any("saved automatically" in item.value for item in app.caption)
+
+
+def test_manual_review_selects_a_newly_created_audit_round(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    secrets_root = tmp_path / "secrets"
+    monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
+    monkeypatch.setenv("VNN_SURVEY_APP_SECRETS", str(secrets_root))
+    store = ProjectStore(projects_root, secrets_root)
+    project = store.create_project(
+        name="Live audit rounds",
+        research_question="Which papers?",
+        scope_description="Test scope",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    run_id = "live-audit-run"
+    audit_dir = store.project_dir(project.slug) / "audits" / run_id
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_audit(round_index: int, title: str) -> Path:
+        path = audit_dir / f"round_{round_index}.csv"
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=["title", "year", "abstract", "manual_decision", "manual_notes"],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "title": title,
+                    "year": "2025",
+                    "abstract": "An abstract.",
+                    "manual_decision": "",
+                    "manual_notes": "",
+                }
+            )
+        return path
+
+    round_zero = write_audit(0, "Initial paper")
+    state = {
+        "project_slug": project.slug,
+        "run_id": run_id,
+        "status": "awaiting_manual_review",
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "rounds": [
+            {
+                "index": 0,
+                "kind": "initial",
+                "status": "ready_for_review",
+                "files": {"audit": str(round_zero)},
+                "counts": {"audit_queue": 1},
+                "flow": [],
+                "error": "",
+            }
+        ],
+    }
+    store.set_current_run(project.slug, run_id)
+    service = PipelineService(store)
+    service._save_state(project.slug, state)
+    st.cache_resource.clear()
+
+    app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    workspace = next(item for item in app.radio if item.key == "workspace_page")
+    workspace.set_value("manual_review")
+    app.run(timeout=20)
+    selector = next(item for item in app.selectbox if item.key == f"audit_round_{run_id}")
+    assert selector.value == 0
+
+    round_one = write_audit(1, "New AI-screened paper")
+    state["rounds"].append(
+        {
+            "index": 1,
+            "kind": "snowball",
+            "status": "ready_for_review",
+            "files": {"audit": str(round_one)},
+            "counts": {"audit_queue": 1},
+            "flow": [],
+            "error": "",
+        }
+    )
+    service._save_state(project.slug, state)
+
+    app.run(timeout=20)
+    selector = next(item for item in app.selectbox if item.key == f"audit_round_{run_id}")
+    assert selector.options == ["0", "1"]
+    assert selector.value == 1
 
 
 def test_ai_research_workspace_opens_for_exported_corpus(
@@ -308,7 +401,7 @@ def test_run_center_restores_saved_progress_and_paper_count(monkeypatch, tmp_pat
     assert any("37 papers collected" in item.proto.text for item in app.get("progress"))
 
 
-def test_live_progress_controls_are_scoped_when_rendered_twice(
+def test_live_progress_controls_render_only_in_the_relevant_module(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -395,10 +488,82 @@ def test_live_progress_controls_are_scoped_when_rendered_twice(
 
     assert not app.exception
     stop_keys = {item.key for item in app.button if item.label == "Stop run"}
-    assert stop_keys == {
-        f"stop_run_prompt_refinement_{project.slug}",
-        f"stop_run_manual_additions_{project.slug}",
+    assert stop_keys == {f"stop_run_prompt_refinement_{project.slug}"}
+
+
+def test_manual_review_tracks_review_queue_creation_until_the_new_round_is_ready(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    secrets_root = tmp_path / "secrets"
+    monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
+    monkeypatch.setenv("VNN_SURVEY_APP_SECRETS", str(secrets_root))
+    store = ProjectStore(projects_root, secrets_root)
+    project = store.create_project(
+        name="Review preparation progress",
+        research_question="Which papers?",
+        scope_description="Test scope",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    run_id = "review-preparation-progress"
+    state = {
+        "project_slug": project.slug,
+        "run_id": run_id,
+        "status": "running",
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "rounds": [
+            {
+                "index": 1,
+                "kind": "snowball",
+                "status": "discovery_complete",
+                "files": {},
+                "counts": {},
+                "flow": [],
+                "error": "",
+            }
+        ],
+        "progress": {
+            "operation": "AI abstract screening and review",
+            "status": "running",
+            "stages": ["AI abstract screening", "Create manual review queue"],
+            "stage": "AI abstract screening",
+            "message": "Analyzing abstracts.",
+            "completed": 1,
+            "total": 4,
+            "paper_count": 4,
+        },
     }
+    store.set_current_run(project.slug, run_id)
+    PipelineService(store)._save_state(project.slug, state)
+    monkeypatch.setattr(
+        TaskManager,
+        "snapshot",
+        lambda self, slug: TaskSnapshot(
+            operation="review_preparation",
+            started_at="2026-01-01T00:00:00",
+            running=True,
+            error="",
+            cancel_requested=False,
+            cancelled=False,
+            can_restart=False,
+        ),
+    )
+    st.cache_resource.clear()
+
+    app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    workspace = next(item for item in app.radio if item.key == "workspace_page")
+    workspace.set_value("manual_review")
+    app.run(timeout=20)
+
+    assert not app.exception
+    stop_keys = {item.key for item in app.button if item.label == "Stop run"}
+    assert stop_keys == {f"stop_run_manual_review_{project.slug}"}
+    assert not any(item.key == f"prepare_review_1_{project.slug}" for item in app.button)
 
 
 def test_ai_prompt_can_be_regenerated_after_widget_is_created(

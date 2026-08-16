@@ -180,20 +180,30 @@ AI settings are project-specific.
 - **Base URL** is the API endpoint. Keep `https://api.openai.com/v1` for the
   official OpenAI API. Change it only when using a compatible provider that
   explicitly documents a different endpoint.
-- **Screening model** is used for batched title prescreening and abstract-level
-  screening.
+- **Title screening model** is used only for the high-recall title prescreen.
+- **Abstract screening model** is used for the main abstract-level decisions.
+- **Prompt refinement model** learns a proposed prompt from cumulative human
+  decisions and reviewer notes.
+- **Historical replay model** is used only for the one-time re-screening of
+  initial AI exclusions.
+- **Abstracts per AI screening batch** controls how many papers share one
+  abstract-screening request. The default is 20 and the maximum is 50. Results
+  are cached per paper; a failed batch is divided automatically until an
+  individual failing paper can be isolated.
 - **Paper Q&A model** answers questions about uploaded PDFs.
 - **Corpus analysis model** proposes a taxonomy and classifies the final corpus.
 - **Refresh model list** loads the models available to the configured key and
-  endpoint. The three tasks can use different models to balance cost and depth.
+  endpoint. Every AI task has an independent selector so cost and depth can be
+  chosen separately.
 
 **Credentials**
 
 - The **OpenAI API key** enables title screening, abstract screening, PDF Q&A,
   and corpus classification.
-- The **OpenAlex API key** is free and required for sustained OpenAlex discovery,
-  enrichment, and citation snowballing.
-- A **Semantic Scholar API key** is optional but gives a dedicated rate limit.
+- The **OpenAlex API key** is needed only when OpenAlex is selected for
+  discovery, enrichment, or citation snowballing.
+- A **Semantic Scholar API key** is optional but gives its discovery,
+  enrichment, and snowballing requests a dedicated rate limit.
 - An **NCBI API key** is optional; PubMed works without one but may allow lower
   request rates.
 - A **Scholarly API contact email** identifies requests and enables Crossref's
@@ -253,6 +263,9 @@ operation, status, current paper count, overall progress, item progress, and the
 latest saved time. The literature-flow diagram and JSON download preserve the
 paper count at each completed stage, including API requests, cache hits, and
 observed rate-limit waiting for abstract enrichment.
+**Export run log** downloads the latest state, stage history, round counts,
+provider failures, errors, and artifact paths as JSON. The same current log is
+also available from Manual Review and Snowball.
 
 Before assigning venue type, rank, or IF, venue enrichment checks records that
 still look like arXiv preprints against DBLP, Crossref, and OpenAlex. A formal
@@ -276,6 +289,17 @@ After discovery, the page estimates the number of AI-eligible papers and token
 usage. Enable **Use AI abstract screening** to receive title-and-abstract
 recommendations, or create a human-only queue. **AI paper limit = 0** means all
 eligible papers; use a small number to test the prompt and cost first.
+The page shows the configured AI batch size and estimated request count. During
+screening, the live progress detail reports the current batch, API requests, and
+cache hits, and a CSV checkpoint is saved after every batch.
+
+The estimate also shows an expected USD cost and a conservative maximum-output
+cost. **Refresh model price** reads the selected model's current public pricing
+from its official OpenAI model documentation when the official API endpoint is
+configured. If the network request, model lookup, or parser fails, SurveyFlow
+keeps using the local fallback catalog in `configs/model_pricing.yaml`. The
+estimate excludes retries, optional historical replay, and billing adjustments;
+it is a planning aid rather than an invoice.
 
 #### 3.5 Add Papers inside Manual Review
 
@@ -326,34 +350,78 @@ CSV can be downloaded at any time, and the paper reader below the table provides
 a larger abstract and AI-evidence view. Any audit change invalidates older final
 exports so Results cannot silently display a stale corpus.
 
-After every paper in the initial audit has a final decision, the **Prompt
-refinement** section can ask the configured AI model to compare the completed
-audit table with the current abstract-screening prompt. It produces a proposed
-complete prompt, a change summary, retained principles, new rules, and risks.
+After every paper in any audit round has a final decision, the **Prompt
+refinement** section can ask its independently configured model to compare all
+audits completed so far, including reviewer notes, with the current
+abstract-screening prompt. A cumulative feedback CSV is saved and can be
+downloaded. The model produces a proposed complete prompt, a change summary,
+retained principles, new rules, and risks.
 The current prompt is not changed automatically: inspect both versions, edit the
 proposal if needed, and explicitly approve or reject it. If the audit table or
 baseline prompt changes before approval, the proposal becomes stale and must be
 generated again.
 
-An approved prompt enables an optional switch in **Snowball** to replay papers
-that the first abstract-level AI pass excluded and that never entered any human
-audit. Papers newly judged Include or Maybe, and failed API requests, enter the
-next Manual Review; papers excluded again remain outside the queue. Baseline,
-proposal, approved prompt, feedback rows, replay inputs, decisions, summaries,
-and reports are preserved in the project for auditability. This replay runs at
-most once for an approved proposal.
+The first approved refinement enables one historical replay in **Snowball**.
+Before any replay API request, every paper already decided by a human in any
+round is removed using DOI, DBLP/provider identifiers, and normalized-title
+aliases. The page displays `initial exclusions - human reviewed = sent to AI`
+so the request size is auditable. Papers newly judged Include or Maybe, and
+failed API requests, enter the next Manual Review; papers excluded again remain
+outside the queue. Later prompt refinements still use all cumulative audits and
+affect newly discovered papers, but they never reopen or repeat the historical
+replay. All prompt and replay artifacts remain preserved.
 
 #### 3.7 Snowball
 
-Included and related papers become seeds. Each round retrieves backward
+Only papers marked Include or Related in the most recently completed review
+round become seeds. Each round retrieves backward
 references and forward citations through the citation infrastructure, normalizes
 the records, deduplicates them against all papers already audited, and applies
-the same title filtering, metadata enrichment, abstract enrichment, optional AI
-screening, and human review process. **Retrieve all references and citing
-papers** is enabled by default: backward references are fetched in OpenAlex ID
-batches, while forward citations use cursor pagination ordered newest first.
-OpenAlex cache entries expire after 24 hours so later survey updates can see new
-citations.
+the same title filtering, metadata enrichment, and abstract enrichment.
+
+A snowball discovery task has at most five visible phases: citation retrieval
+with cross-round deduplication, rule screening, optional AI title screening,
+venue enrichment, and abstract enrichment. It deliberately stops before any
+abstract-level AI decision. Select **Prepare round N review** afterward to run
+the optional one-time historical replay, perform AI abstract screening (or make
+a human-only queue), and save the new Manual Review round. While that task is
+running, Manual Review follows its progress; when it completes, the new round is
+added to the round selector and selected automatically.
+
+The page separates **Latest reviewed seeds**, **Single-paper snowball**, and
+**Update AI prompt** into distinct tabs. Single-paper mode is intended for a
+known paper whose earlier citation lookup failed or for a deliberate additional
+seed: enter its title, search selected metadata sources, confirm the best match,
+and start a run containing only that seed. The target itself is not placed back
+into review when it was already audited; only previously unseen references and
+citing papers continue through screening. It uses the same provider fallback,
+checkpoint, coverage report, and cross-round deduplication logic as a normal
+round.
+
+The complete provider response remains available as a checkpoint, but only
+papers not seen in any earlier audit enter screening, enrichment, and the new
+review round. Matching uses DOI, DBLP/provider identifiers, and normalized title,
+so an already reviewed preprint is not presented again merely because a provider
+returns its published version with changed metadata.
+
+Choose up to three citation providers in priority order. The recommended
+computer-science default is **Semantic Scholar**, then **OpenCitations**, with
+OpenAlex disabled. **Merge coverage** queries every selected provider and unions
+the deduplicated results. **Failover only** stops after the first successful
+provider. Provider failures are isolated to the affected seed and direction;
+later seeds still query that provider.
+
+**Retrieve all references and citing papers** is enabled by default. Provider
+queries are restricted to the project's year range where the API supports it.
+Successful responses are cached for 24 hours, and the candidate CSV is updated
+after every seed. A provider failure does not discard successful results or block
+screening and review. Instead, each seed is marked `complete`, `partial`, or
+`failed`; missing providers and request errors are saved in a downloadable seed
+coverage report and propagated to discovered candidates. A `failed` seed prevents
+a false convergence claim, while `partial` coverage remains a visible warning.
+The summary preserves provider order, strategy, successes, failures, errors,
+per-seed coverage, available/fetched counts, and truncation. The current round
+must be converted into a review queue before another snowball round can start.
 
 Disable complete retrieval only when a very large citation graph requires
 per-seed safety limits. The saved snowball summary records available and fetched
@@ -504,7 +572,7 @@ verification-derived techniques, or useful snowball seeds.
    paper. Include direct formal verification work; use Related for in-scope
    provable repair or formally grounded explainability; exclude papers that use
    LLMs only to verify unrelated artifacts.
-7. Snowball from all Include and Related papers. Audit every new round and stop
+7. Snowball from the Include and Related papers newly accepted in the latest round. Audit every new round and stop
    when the process converges or a documented stopping rule is reached.
 8. Generate final exports, retain the complete audit CSV, and only then use PDF
    Q&A or corpus classification.
@@ -536,6 +604,7 @@ corpus together when archiving or publishing a review.
 | --- | --- |
 | The search returns thousands of unrelated papers | Inspect group logic. Put synonyms in the same row and independent concepts in separate rows. Add only high-precision title exclusions, then enable AI title prescreening. |
 | Abstract enrichment is slow | Check the flow diagnostics for 429 retries and wait time. Use native abstracts first, configure multiple fallback providers, provide recommended keys/email, and test on a limited set before a full run. |
+| A citation provider fails during snowballing | Keep a secondary provider selected. Successful results remain valid, the affected seeds are marked in the coverage report, and candidates can continue to screening and review. A request failure does not disable that provider for later seeds. For OpenAlex `429` errors, inspect the [OpenAlex usage dashboard](https://openalex.org/settings/usage). |
 | Stop takes time | Stop is cooperative; the active HTTP request or AI batch must finish safely before the task exits. |
 | A stopped run begins discovery again | Use **Resume run** in Current run. **Start a new initial run** intentionally creates another run from the first stage. |
 | The current run disappears after changing pages | Return to Run Center for the full live panel. The sidebar also shows the selected project's saved status. Ensure the same project is selected. |
@@ -661,11 +730,13 @@ AND。向已有组增加词会扩大检索；增加一个新组会收窄检索�
 #### 3.3 AI 设置
 
 **模型与 Base URL：** Base URL 默认应保持为 `https://api.openai.com/v1`。只有在使用
-明确兼容 OpenAI 接口的其他服务时才修改。筛选模型用于标题和摘要筛选；论文问答模型
-用于 PDF；文献集分析模型用于生成分类体系和整体分类。三者可以选择不同规格。
+明确兼容 OpenAI 接口的其他服务时才修改。标题预筛、摘要筛选、Prompt 更新、历史结果回放、
+论文 PDF 问答和文献集整体分类各自拥有独立模型选择，不会再共用一个设置。
+**Abstracts per AI screening batch** 控制一次摘要筛选请求包含的论文数，默认 20、最大 50。
+结果按单篇缓存；批次失败时会自动拆分，直到隔离出真正失败的单篇。
 
-**密钥：** OpenAI key 用于所有 AI 功能；OpenAlex 免费 key 用于持续检索、摘要和引用；
-Semantic Scholar 与 NCBI key 可选；Scholarly API contact email 用于标识请求并进入
+**密钥：** OpenAI key 用于所有 AI 功能；只有选择 OpenAlex 时才需要其 key；
+Semantic Scholar 与 NCBI key 可选，其中 Semantic Scholar key 能提供更稳定的独立限速；Scholarly API contact email 用于标识请求并进入
 Crossref polite pool。输入后必须点击相应的 **Apply**。密钥只保存在
 `.secrets/app_projects/`，不会写入项目 YAML、CSV 或日志。
 
@@ -687,7 +758,8 @@ Crossref polite pool。输入后必须点击相应的 **Apply**。密钥只保�
 - **DBLP auto** 先尝试 publication API，失败时回退到 SPARQL。
 - **CORE ranks online** 尝试补充会议等级。IF 或 rank 为空表示元数据未知，不等于质量低。
 - **AI title prescreen** 在摘要补全前批量读取标题，以高召回方式排除明确无关项；模糊项保留。
-- **AI abstract screening** 在摘要补全后读取标题和摘要，生成更精细的纳入建议。
+- **AI abstract screening** 在摘要补全后批量读取标题和摘要，生成更精细的纳入建议；
+  每批完成后立即保存 CSV checkpoint，进度区显示批次、API 请求数和缓存命中数。
 
 Venue enrichment 会先将仍像 arXiv 预印本的记录与 DBLP、Crossref、OpenAlex 中的正式版本
 进行保守匹配。只有 DOI，或题目、作者、年份证据足够一致时，才替换 venue、DOI 和 publication
@@ -697,6 +769,8 @@ type；无法确认的仍保留为 arXiv。匹配证据和数据源错误保存�
 页面显示 Run ID、当前操作、状态、已收集论文数、总进度、当前批次和最后保存时间。
 Literature flow 会记录每一步的输入、排除和保留数量，并可下载 SVG 流程图和 JSON 统计。
 摘要诊断还显示 API 请求、批请求、缓存命中、429 重试和等待时间。
+**Export run log** 可从运行中心、人工审阅和滚雪球页面下载当前 JSON 日志，其中包含阶段历史、
+每轮计数、数据源失败、错误与结果文件路径，但不包含 API key。
 
 **Stop run** 是安全协作停止：正在执行的网络请求或 AI 批次结束后才退出，所以不一定立即
 停止。**Resume run** 从最近保存的候选、规则筛选、标题筛选、venue 或部分摘要 checkpoint
@@ -735,24 +809,37 @@ Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank�
 每轮所有论文都需要人工最终决定，之后才能继续滚雪球。任何审阅变化都会使旧的最终导出失效，
 避免结果页继续显示过期文献集；audit CSV 可随时下载。
 
-首轮人工审阅全部完成后，页面中的 **Prompt refinement** 可以把当前摘要筛选 prompt 与已完成人工
-决定的审阅表交给 AI 比较，并生成一份完整的新 prompt 提案、修改摘要、保留原则、新规则和风险。
+任意一轮人工审阅全部完成后，页面中的 **Prompt refinement** 都可以把截至当前的所有审阅表、人工
+决定和 reviewer notes 汇总为 CSV，再与当前摘要筛选 prompt 一并交给独立设置的模型。系统会生成
+一份完整的新 prompt 提案、修改摘要、保留原则、新规则和风险。
 系统不会自动启用它：用户需要对照旧版审查、按需编辑，再明确批准或拒绝。如果提案生成后人工审阅表
 或旧 prompt 又发生变化，旧提案会失效，必须重新生成。
 
-批准后，**滚雪球**页面会出现可选开关，用新 prompt 重新筛选首轮被摘要 AI 排除且从未进入任何人工
-审阅的论文。新判断为 Include、Maybe 或 API 失败的论文进入下一轮人工审阅；再次 Exclude 的论文不
-进入队列，但仍保留完整回放记录。旧 prompt、提案、批准版本、反馈表、回放输入、判断与报告都会随
-项目保存；同一批准版本最多回放一次。
+第一次批准 Prompt 更新后，**滚雪球**页面会出现一次性的历史回放开关。在发出任何 LLM 请求之前，
+系统先用 DOI、DBLP/数据源标识与标准化标题，从初始 AI 排除池中移除所有已经人工决定过的论文，并
+明确显示“初始排除数 - 已人工审阅数 = 实际发送 AI 数”。新判断为 Include、Maybe 或 API 失败的论文
+进入下一轮人工审阅；再次 Exclude 的论文不进入队列。后续轮次仍可继续利用全部累计审阅更新 Prompt，
+但只影响新发现论文，不会再次回放旧 AI 结果。所有版本、反馈 CSV、输入、判断和报告都会保存。
 
 #### 3.7 滚雪球
 
-Include 和 Related 论文共同作为 seed。每轮收集 backward references 与 forward citations，
+只有最近完成的审阅轮次中标为 Include 或 Related 的新增论文会作为下一轮 seed。每轮收集 backward references 与 forward citations，
 再与所有已审论文去重，然后重复规则筛选、标题 AI 预筛、venue/摘要补全、摘要级 AI 建议和
-人工审阅。默认开启 **获取全部参考文献和引用论文**：参考文献按 OpenAlex ID 批量获取，引用论文
-使用 cursor 分页并优先返回最新工作。OpenAlex 缓存 24 小时后失效，后续更新能够发现新增引用。
-只有引用图特别大时才建议关闭完整模式并设置每个 seed 的安全上限。保存的 summary 会记录可用数、
-实际获取数、发生截断的 seed，以及逐 seed 的解析明细。
+人工审阅。数据源完整返回会保留为 checkpoint，但只有从未出现在任何早期审阅中的增量论文会进入
+筛选、补全和新审阅轮次。系统综合 DOI、DBLP/数据源标识和标准化标题匹配，避免预印本换成正式发表
+元数据后再次要求审阅。用户可以按优先级选择三个引文数据源。计算机领域默认使用 Semantic Scholar、随后
+OpenCitations，并关闭 OpenAlex。**融合覆盖**会查询并合并所有数据源，**仅故障切换**会在首个成功
+数据源后停止。某个数据源请求失败时，只标记受影响的 seed 和引用方向，后续 seed 仍会继续尝试该数据源。
+默认开启 **获取全部参考文献和引用论文**；成功响应缓存 24 小时，每完成一个 seed 就更新候选文件。
+部分数据源失败不会丢弃成功结果，也不会阻止后续筛选和人工审阅。每篇 seed 会标记为 `complete`、
+`partial` 或 `failed`，缺失来源和错误信息会写入可下载的覆盖报告，并随新候选进入审阅表。`partial`
+只产生警告；完全未成功滚雪球的 `failed` seed 会阻止系统误报收敛。开始下一轮之前，必须先为当前轮
+创建并完成人工审阅队列。只有引用图特别大时才建议关闭完整模式并设置每个 seed 的安全上限。
+
+页面分为 **最新审阅种子**、**单篇论文滚雪球**和 **更新 AI Prompt** 三个标签。某篇已知论文曾经
+查询失败或需要额外作为 seed 时，可在单篇模式输入标题、检索并确认元数据，然后只对这一篇执行引文
+扩展。它沿用相同的数据源 fallback、checkpoint、覆盖报告和跨轮去重；如果目标论文本身早已人工审阅，
+它不会再次进入审阅表，只有从未见过的参考文献与引用论文继续后续流程。
 
 “Converged”只表示在当前 seed、数据源和数量限制下，没有新的唯一论文进入下一轮审阅队列；
 它不证明全世界不存在遗漏文献。也可以根据预先写明的停止规则主动结束。
@@ -854,20 +941,25 @@ Manual review 末尾の Add papers から補います。
 #### 3.3 AI settings
 
 公式 OpenAI API では Base URL を `https://api.openai.com/v1` のまま使用します。
-screening、PDF Q&A、corpus analysis のモデルは個別に選択できます。OpenAI key は AI 機能、
-無料 OpenAlex key は継続的な検索・抄録・引用に使います。Semantic Scholar / NCBI key と
+title screening、abstract screening、prompt refinement、historical replay、PDF Q&A、
+corpus analysis の各モデルを独立して選択できます。OpenAI key は AI 機能に使い、
+OpenAlex key は OpenAlex を選択した場合だけ必要です。Semantic Scholar / NCBI key と
 scholarly contact email は任意です。キー入力後は対応する **Apply** を押してください。
 
 既存の抄録が最優先で、欠落分だけを設定順に arXiv、PubMed、Crossref、Semantic Scholar、
 OpenAlex などへ問い合わせます。成功した時点で次の provider には進みません。batch size は
 上限として働き、サービス別制限は自動適用されます。prompt は直接編集でき、範囲変更後に再生成します。
+Abstracts per AI screening batch は抄録審査 1 リクエストあたりの論文数で、既定値は 20、
+最大 50 です。結果は論文ごとにキャッシュされ、失敗したバッチは自動分割されます。
 
 #### 3.4 Run center
 
 Query / Abstract limit の `0` は全件を意味し、小さい値はテスト用です。AI title prescreen は
 抄録取得前に明らかな無関係タイトルだけを高再現率で除き、AI abstract screening は抄録取得後に
-詳細な推奨を作ります。Run ID、工程、件数、進捗、保存時刻、各工程の入力・除外・保持数を確認でき、
+まとめて詳細な推奨を作ります。各バッチ後に CSV checkpoint を保存します。Run ID、工程、件数、進捗、保存時刻、各工程の入力・除外・保持数を確認でき、
 フロー SVG と counts JSON をダウンロードできます。
+**Export run log** は工程履歴、round 件数、provider 障害、エラー、成果物パスを JSON で保存し、
+Run center、Manual review、Snowball から取得できます。API key は含まれません。
 
 Venue enrichment は arXiv プレプリントとして残っている記録を DBLP、Crossref、OpenAlex の正式版と
 照合します。DOI、または title・authors・year の証拠が十分に一致する場合だけ venue、DOI、type を
@@ -896,25 +988,37 @@ AI は推奨にすぎず、人の判定が最終結果です。各論文を Incl
 更新されます。全件を確定しないと次の snowball round へ進めません。監査変更後は古い最終出力が
 無効になるため、Results で再生成してください。
 
-初回監査の全件を確定した後、**Prompt refinement** で現在の抄録選別 prompt と人の判定表を AI に
-比較させ、完全な改訂 prompt、変更概要、維持する原則、新規ルール、リスクを提案できます。自動では
+各監査 round の全件を確定した後、**Prompt refinement** で、これまでの全判定と reviewer notes を
+累積 CSV にまとめ、現在の抄録選別 prompt とともに専用モデルへ渡せます。完全な改訂 prompt、変更概要、
+維持する原則、新規ルール、リスクを提案できます。自動では
 有効化されません。旧版と提案を確認し、必要なら編集して、明示的に承認または却下します。提案後に
 監査表または基準 prompt が変わった場合、その提案は失効し、再生成が必要です。
 
-承認後は **Snowball** で、初回の抄録 AI が除外し、まだ人が一度も監査していない論文だけを新しい
-prompt で再選別できます。Include、Maybe、または API 失敗は次の Manual review に入り、再度
-Exclude された論文は queue に入りません。基準・提案・承認 prompt、feedback、replay 入力、判定、
-report は監査証跡として保存され、同じ承認版の replay は一度だけ実行されます。
+最初の承認後だけ **Snowball** で historical replay を一度実行できます。LLM 呼び出し前に、DOI、
+DBLP/provider ID、正規化タイトルで既に人が判定した全論文を除き、`初期除外 - 人手監査済み = AI送信数`
+を表示します。Include、Maybe、API 失敗は次の Manual review に入り、再度 Exclude された論文は入りません。
+後続 round でも累積監査から prompt を更新できますが、新規論文だけに適用され、旧結果の replay は再開しません。
 
 #### 3.7 Snowball
 
-Include と Related を seed とし、後方参考文献と前方引用を取得します。既査読文献と重複排除した後、
+直近に完了したレビュー・ラウンドで Include または Related とした新規論文だけを次の seed とし、後方参考文献と前方引用を取得します。既査読文献と重複排除した後、
 同じ選別・補完・人手レビューを繰り返します。既定では **すべての参考文献と引用論文を取得** が
-有効です。参考文献は OpenAlex ID を batch 取得し、前方引用は新しい順の cursor pagination で全件
-取得します。cache は 24 時間で失効します。非常に大きな citation graph の場合だけ完全取得を無効に
-して seed ごとの安全上限を設定できます。summary には取得可能数、実取得数、切り捨てた seed、
-seed ごとの解析結果が保存されます。Converged は現在の seed、データソース、上限のもとで
+有効です。完全な取得結果は checkpoint に保持されますが、過去の監査に一度も現れていない増分論文だけが
+新しい選別・補完・レビューに入ります。DOI、DBLP/プロバイダー ID、正規化タイトルを併用して重複を判定します。
+引用プロバイダーを優先順に3つまで選べます。推奨初期値は Semantic Scholar、
+OpenCitations、OpenAlex 無効です。Merge coverage は全プロバイダーの結果を統合し、Failover only は
+最初の成功で停止します。プロバイダー障害は影響した seed と方向だけに記録され、後続の seed でも
+同じプロバイダーを再び試します。成功した応答は24時間キャッシュされ、seed ごとに候補ファイルを更新します。
+一部の失敗は成功済み結果を破棄せず、選別や人手レビューも妨げません。各 seed は `complete`、`partial`、
+`failed` として記録され、不足プロバイダーとエラーはダウンロード可能なカバレッジ報告およびレビュー表に
+保存されます。`partial` は警告のみで、全取得に失敗した `failed` seed は誤った収束判定を防ぎます。
+次のラウンドの前に、現在の候補からレビュー待ち行列を作成してください。非常に大きな citation graph の場合だけ完全取得を無効に
+して seed ごとの安全上限を設定できます。Converged は現在の seed、データソース、上限のもとで
 新しいユニーク文献が review queue に入らなかったことを意味し、完全性の証明ではありません。
+
+ページは **Latest reviewed seeds**、**Single-paper snowball**、**Update AI prompt** に分かれます。
+失敗した既知論文や追加 seed は、タイトル検索でメタデータを確認して単独実行できます。通常 round と同じ
+fallback、checkpoint、coverage report、重複排除を使い、既に監査済みの target 自体は再レビューされません。
 
 #### 3.8 Results and AI research
 
@@ -987,20 +1091,25 @@ OpenAIRE와 Europeana는 계획 단계라 현재 실시간 검색할 수 없습�
 #### 3.3 AI settings
 
 공식 OpenAI API에서는 Base URL `https://api.openai.com/v1`을 유지합니다. screening, PDF Q&A,
-corpus analysis 모델을 각각 선택할 수 있습니다. OpenAI key는 AI 기능에, 무료 OpenAlex key는 지속적인
+corpus analysis뿐 아니라 title screening, abstract screening, prompt refinement, historical replay
+모델도 각각 독립적으로 선택할 수 있습니다. OpenAI key는 AI 기능에 사용하며 OpenAlex key는 OpenAlex를 선택할 때만 필요합니다.
 검색, 초록, 인용 조회에 사용됩니다. Semantic Scholar / NCBI key와 scholarly contact email은
 선택 사항입니다. 키를 입력한 뒤 해당 **Apply** 버튼을 눌러야 합니다.
 
 검색 중 받은 초록을 먼저 보존하고, 누락된 논문만 설정한 우선순서대로 provider에 요청합니다. 성공하면
 그 논문은 뒤 provider로 보내지지 않습니다. batch size는 최대값이며 서비스별 제한은 자동 적용됩니다.
 prompt는 편집할 수 있고 연구 범위를 바꾼 후 다시 생성해야 합니다.
+Abstracts per AI screening batch는 초록 선별 요청 한 번에 포함할 논문 수이며 기본값은 20, 최댓값은
+50입니다. 결과는 논문별로 캐시되고 실패한 배치는 자동 분할됩니다.
 
 #### 3.4 Run center
 
 Query / Abstract limit의 `0`은 전체를 의미하고 작은 값은 테스트용입니다. AI title prescreen은 초록
 보강 전에 명확히 무관한 제목을 고재현율로 제거하고, AI abstract screening은 제목과 초록으로 더 자세한
-추천을 만듭니다. Run ID, 작업, 수집 논문 수, 진행률, 마지막 저장 시각과 각 단계의 입력/제외/유지 수를
+추천을 배치로 만들며 각 배치 뒤 CSV checkpoint를 저장합니다. Run ID, 작업, 수집 논문 수, 진행률, 마지막 저장 시각과 각 단계의 입력/제외/유지 수를
 볼 수 있으며 flow SVG와 counts JSON을 받을 수 있습니다.
+**Export run log**는 단계 기록, 회차별 수, provider 실패, 오류와 결과 파일 경로를 JSON으로 내보내며
+Run center, Manual review, Snowball에서 받을 수 있습니다. API key는 포함하지 않습니다.
 
 Venue enrichment는 arXiv 프리프린트로 남은 기록을 DBLP, Crossref, OpenAlex의 정식 출판본과
 보수적으로 대조합니다. DOI 또는 title, authors, year 근거가 충분히 일치할 때만 venue, DOI, type을
@@ -1029,25 +1138,37 @@ Later는 임시 보류에만 사용합니다. Related는 repair, explainability,
 흐름도 즉시 갱신됩니다. 모든 논문을 확정해야 다음 snowball round로 진행할 수 있습니다. audit이
 바뀌면 이전 최종 결과는 무효화되므로 Results에서 다시 생성해야 합니다.
 
-초기 audit의 모든 결정을 확정한 뒤 **Prompt refinement**에서 현재 초록 선별 prompt와 사람의 결정표를
-AI가 비교해 완전한 개정 prompt, 변경 요약, 유지 원칙, 새 규칙과 위험을 제안하게 할 수 있습니다. 제안은
+각 audit 회차를 모두 확정한 뒤 **Prompt refinement**에서 지금까지의 모든 결정과 reviewer notes를
+누적 CSV로 만들고 현재 초록 선별 prompt와 함께 전용 모델에 보낼 수 있습니다. 완전한 개정 prompt,
+변경 요약, 유지 원칙, 새 규칙과 위험을 제안하게 할 수 있습니다. 제안은
 자동 적용되지 않습니다. 기존 prompt와 비교하고 필요하면 편집한 뒤 명시적으로 승인하거나 거절해야
 합니다. 제안 후 audit 표나 기준 prompt가 변경되면 제안은 만료되어 다시 생성해야 합니다.
 
-승인 후 **Snowball**에서 초기 초록 AI가 제외했고 아직 한 번도 사람이 검토하지 않은 논문만 새 prompt로
-다시 선별할 수 있습니다. Include, Maybe 또는 API 실패는 다음 Manual review에 들어가고, 다시 Exclude된
-논문은 queue에 들어가지 않습니다. 기준·제안·승인 prompt, feedback, replay 입력, 결정과 report는 감사
-기록으로 저장되며 같은 승인 버전은 한 번만 replay됩니다.
+첫 승인 뒤에만 **Snowball**에서 historical replay를 한 번 실행할 수 있습니다. LLM 요청 전에 DOI,
+DBLP/provider ID와 정규화 제목으로 이미 사람이 결정한 모든 논문을 제거하고
+`초기 제외 - 사람 검토 완료 = AI 전송 수`를 표시합니다. Include, Maybe 또는 API 실패는 다음 Manual review에
+들어가고 다시 Exclude된 논문은 들어가지 않습니다. 이후 회차에서도 누적 audit으로 prompt를 갱신할 수 있지만
+새 논문에만 적용되며 과거 AI 결과 replay는 다시 열리지 않습니다.
 
 #### 3.7 Snowball
 
-Include와 Related 논문을 seed로 삼아 참고문헌과 인용 논문을 수집합니다. 기존 모든 검토 논문과 중복을
+가장 최근에 완료한 검토 회차에서 Include 또는 Related로 결정한 새 논문만 다음 회차의 seed로 사용해 참고문헌과 인용 논문을 수집합니다. 기존 모든 검토 논문과 중복을
 제거한 뒤 같은 선별, 보강, 사람 검토를 반복합니다. 기본적으로 **모든 참고문헌과 인용 논문 가져오기**가
-활성화됩니다. 참고문헌은 OpenAlex ID batch로 가져오고, 전방 인용은 최신순 cursor pagination으로 전부
-가져옵니다. cache는 24시간 뒤 만료됩니다. 인용 그래프가 매우 클 때만 전체 수집을 끄고 seed별 안전
-한도를 설정할 수 있습니다. summary에는 사용 가능 수, 실제 수집 수, 잘린 seed와 seed별 분석 결과가
-저장됩니다. Converged는 현재 seed, 소스, 제한에서 새 고유 논문이
+활성화됩니다. 전체 제공자 결과는 checkpoint로 보관하지만 이전 검토에 한 번도 등장하지 않은 증분 논문만
+새 선별, 보강 및 검토 회차에 들어갑니다. DOI, DBLP/제공자 ID와 정규화된 제목을 함께 사용해 중복을 판단합니다.
+인용 제공자를 우선순위대로 최대 3개 선택할 수 있으며 권장 기본값은 Semantic Scholar,
+OpenCitations, OpenAlex 비활성화입니다. Merge coverage는 모든 결과를 합치고 Failover only는 첫 성공 후
+중지합니다. 제공자 실패는 영향을 받은 seed와 방향에만 기록되며 이후 seed에서도 같은 제공자를 다시 시도합니다.
+성공한 응답은 24시간 캐시되며 seed마다 후보 파일이 갱신됩니다. 일부 제공자 실패는 성공한 결과를 버리거나
+선별 및 수동 검토를 막지 않습니다. 각 seed는 `complete`, `partial`, `failed`로 표시되고 누락된 제공자와
+오류는 다운로드 가능한 범위 보고서와 검토 표에 저장됩니다. `partial`은 경고만 남기며 모든 조회가 실패한
+`failed` seed는 잘못된 수렴 판정을 막습니다. 다음 회차 전에 현재 후보의 검토 대기열을 만들어야 합니다.
+인용 그래프가 매우 클 때만 전체 수집을 끄고 seed별 안전 한도를 설정할 수 있습니다. Converged는 현재 seed, 소스, 제한에서 새 고유 논문이
 review queue에 들어오지 않았다는 뜻이며 완전성을 증명하지 않습니다.
+
+페이지는 **Latest reviewed seeds**, **Single-paper snowball**, **Update AI prompt** 탭으로 나뉩니다.
+실패한 알려진 논문이나 추가 seed는 제목으로 메타데이터를 확인한 뒤 그 논문만 실행할 수 있습니다.
+일반 회차와 같은 fallback, checkpoint, coverage report와 중복 제거를 사용하며 이미 검토한 target 자체는 다시 나타나지 않습니다.
 
 #### 3.8 Results and AI research
 

@@ -101,6 +101,10 @@ class SnowballingConfig:
     max_backward_per_seed: int = 0
     max_forward_per_seed: int = 0
     include_seed_papers: bool = True
+    providers: list[str] = field(default_factory=lambda: ["semantic_scholar", "opencitations"])
+    provider_strategy: str = "merge"
+    semantic_scholar_api_key_env: str = "SEMANTIC_SCHOLAR_API_KEY"
+    opencitations_access_token_env: str = "OPENCITATIONS_ACCESS_TOKEN"
     openalex_api_key_env: str = "OPENALEX_API_KEY"
     openalex_email_env: str = "OPENALEX_EMAIL"
 
@@ -115,6 +119,7 @@ class LlmScreeningConfig:
     request_delay_seconds: float = 0.2
     timeout_seconds: int = 60
     retries: int = 3
+    batch_size: int = 20
     max_output_tokens: int = 800
     prompt_version: str = "transformer-verification-screen-v1"
     system_prompt_path: Path | None = None
@@ -152,15 +157,11 @@ class SurveyConfig:
     def build_queries(self) -> list[str]:
         if self.query_strategy == "grouped":
             queries = (
-                self._grouped_queries()
-                or list(self.logical_queries)
-                or self._cartesian_queries()
+                self._grouped_queries() or list(self.logical_queries) or self._cartesian_queries()
             )
         elif self.query_strategy == "logical":
             queries = (
-                list(self.logical_queries)
-                or self._grouped_queries()
-                or self._cartesian_queries()
+                list(self.logical_queries) or self._grouped_queries() or self._cartesian_queries()
             )
         elif self.query_strategy == "cartesian":
             queries = self._cartesian_queries()
@@ -236,29 +237,17 @@ def load_config(path: Path) -> SurveyConfig:
         ),
         discovery=DiscoveryConfig(
             sources=[str(item) for item in discovery.get("sources", ["dblp"])],
-            cache_dir=Path(discovery["cache_dir"])
-            if discovery.get("cache_dir")
-            else None,
+            cache_dir=Path(discovery["cache_dir"]) if discovery.get("cache_dir") else None,
             results_per_page=int(discovery.get("results_per_page", 100)),
             max_pages_per_query=int(discovery.get("max_pages_per_query", 2)),
             request_delay_seconds=float(discovery.get("request_delay_seconds", 0.25)),
-            arxiv_request_delay_seconds=float(
-                discovery.get("arxiv_request_delay_seconds", 3.0)
-            ),
+            arxiv_request_delay_seconds=float(discovery.get("arxiv_request_delay_seconds", 3.0)),
             timeout_seconds=int(discovery.get("timeout_seconds", 30)),
             retries=int(discovery.get("retries", 3)),
-            crossref_email_env=str(
-                discovery.get("crossref_email_env", "CROSSREF_EMAIL")
-            ),
-            openalex_api_key_env=str(
-                discovery.get("openalex_api_key_env", "OPENALEX_API_KEY")
-            ),
-            openalex_email_env=str(
-                discovery.get("openalex_email_env", "OPENALEX_EMAIL")
-            ),
-            pubmed_api_key_env=str(
-                discovery.get("pubmed_api_key_env", "NCBI_API_KEY")
-            ),
+            crossref_email_env=str(discovery.get("crossref_email_env", "CROSSREF_EMAIL")),
+            openalex_api_key_env=str(discovery.get("openalex_api_key_env", "OPENALEX_API_KEY")),
+            openalex_email_env=str(discovery.get("openalex_email_env", "OPENALEX_EMAIL")),
+            pubmed_api_key_env=str(discovery.get("pubmed_api_key_env", "NCBI_API_KEY")),
             pubmed_email_env=str(discovery.get("pubmed_email_env", "NCBI_EMAIL")),
         ),
         filters=FilterConfig(
@@ -282,15 +271,11 @@ def load_config(path: Path) -> SurveyConfig:
             cache_dir=Path(enrichment["cache_dir"]) if enrichment.get("cache_dir") else None,
             batch_size=max(1, int(enrichment.get("batch_size", 100))),
             request_delay_seconds=float(enrichment.get("request_delay_seconds", 0.2)),
-            arxiv_request_delay_seconds=float(
-                enrichment.get("arxiv_request_delay_seconds", 3.0)
-            ),
+            arxiv_request_delay_seconds=float(enrichment.get("arxiv_request_delay_seconds", 3.0)),
             timeout_seconds=int(enrichment.get("timeout_seconds", 30)),
             retries=int(enrichment.get("retries", 3)),
             min_title_similarity=float(enrichment.get("min_title_similarity", 0.86)),
-            crossref_email_env=str(
-                enrichment.get("crossref_email_env", "CROSSREF_EMAIL")
-            ),
+            crossref_email_env=str(enrichment.get("crossref_email_env", "CROSSREF_EMAIL")),
             semantic_scholar_api_key_env=str(
                 enrichment.get(
                     "semantic_scholar_api_key_env",
@@ -299,9 +284,7 @@ def load_config(path: Path) -> SurveyConfig:
             ),
             openalex_api_key_env=str(enrichment.get("openalex_api_key_env", "OPENALEX_API_KEY")),
             openalex_email_env=str(enrichment.get("openalex_email_env", "OPENALEX_EMAIL")),
-            pubmed_api_key_env=str(
-                enrichment.get("pubmed_api_key_env", "NCBI_API_KEY")
-            ),
+            pubmed_api_key_env=str(enrichment.get("pubmed_api_key_env", "NCBI_API_KEY")),
             pubmed_email_env=str(enrichment.get("pubmed_email_env", "NCBI_EMAIL")),
         ),
         venue_quality=VenueQualityConfig(
@@ -315,9 +298,7 @@ def load_config(path: Path) -> SurveyConfig:
             core_cache_dir=Path(venue_quality["core_cache_dir"])
             if venue_quality.get("core_cache_dir")
             else None,
-            core_request_delay_seconds=float(
-                venue_quality.get("core_request_delay_seconds", 0.5)
-            ),
+            core_request_delay_seconds=float(venue_quality.get("core_request_delay_seconds", 0.5)),
             core_timeout_seconds=int(venue_quality.get("core_timeout_seconds", 30)),
         ),
         snowballing=SnowballingConfig(
@@ -341,9 +322,21 @@ def load_config(path: Path) -> SurveyConfig:
                 int(snowballing.get("max_forward_per_seed", 0)),
             ),
             include_seed_papers=bool(snowballing.get("include_seed_papers", True)),
-            openalex_api_key_env=str(
-                snowballing.get("openalex_api_key_env", "OPENALEX_API_KEY")
+            providers=_snowball_providers(snowballing.get("providers")),
+            provider_strategy=_snowball_provider_strategy(snowballing.get("provider_strategy")),
+            semantic_scholar_api_key_env=str(
+                snowballing.get(
+                    "semantic_scholar_api_key_env",
+                    "SEMANTIC_SCHOLAR_API_KEY",
+                )
             ),
+            opencitations_access_token_env=str(
+                snowballing.get(
+                    "opencitations_access_token_env",
+                    "OPENCITATIONS_ACCESS_TOKEN",
+                )
+            ),
+            openalex_api_key_env=str(snowballing.get("openalex_api_key_env", "OPENALEX_API_KEY")),
             openalex_email_env=str(snowballing.get("openalex_email_env", "OPENALEX_EMAIL")),
         ),
         llm_screening=LlmScreeningConfig(
@@ -353,12 +346,11 @@ def load_config(path: Path) -> SurveyConfig:
             if llm_screening.get("api_key_file")
             else None,
             base_url=str(llm_screening.get("base_url", "https://api.openai.com/v1")),
-            cache_dir=Path(llm_screening["cache_dir"])
-            if llm_screening.get("cache_dir")
-            else None,
+            cache_dir=Path(llm_screening["cache_dir"]) if llm_screening.get("cache_dir") else None,
             request_delay_seconds=float(llm_screening.get("request_delay_seconds", 0.2)),
             timeout_seconds=int(llm_screening.get("timeout_seconds", 60)),
             retries=int(llm_screening.get("retries", 3)),
+            batch_size=max(1, min(50, int(llm_screening.get("batch_size", 20)))),
             max_output_tokens=int(llm_screening.get("max_output_tokens", 800)),
             prompt_version=str(
                 llm_screening.get(
@@ -475,6 +467,18 @@ def dedupe_preserving_order(values: list[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(value)
     return deduped
+
+
+def _snowball_providers(value: Any) -> list[str]:
+    supported = {"semantic_scholar", "opencitations", "openalex"}
+    raw = value if isinstance(value, list) else ["semantic_scholar", "opencitations"]
+    providers = [str(item).strip() for item in raw if str(item).strip() in supported]
+    return list(dict.fromkeys(providers)) or ["semantic_scholar", "opencitations"]
+
+
+def _snowball_provider_strategy(value: Any) -> str:
+    strategy = str(value or "merge").strip().lower()
+    return strategy if strategy in {"merge", "failover"} else "merge"
 
 
 def expand_query_alternatives(query: str) -> list[str]:

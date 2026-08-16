@@ -9,8 +9,8 @@ DISPLAY_STAGE_ORDER = [
     "deduplication",
     "rule_screening",
     "ai_title_screening",
-    "ai_abstract_screening",
     "prompt_replay",
+    "ai_abstract_screening",
     "manual_additions",
     "human_audit",
     "final_corpus",
@@ -20,6 +20,12 @@ MANUAL_STAGE_KEYS = {
     "manual_review_additions",
     "manual_loop_additions",
     "manual_return_to_review",
+}
+DISPLAY_DETAIL_KEYS = {
+    "ai_abstract_screening": ("failed",),
+    "prompt_replay": ("failed",),
+    "manual_additions": ("manual papers",),
+    "human_audit": ("pending",),
 }
 
 
@@ -263,8 +269,28 @@ def _display_flow_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         prepared = dict(stage)
         prepared.pop("loop_to", None)
+        prepared["details"] = _compact_display_details(prepared)
         selected.append(prepared)
     return selected
+
+
+def _compact_display_details(stage: dict[str, Any]) -> dict[str, int | str]:
+    key = str(stage.get("key") or "")
+    details = stage.get("details") or {}
+    if not isinstance(details, dict):
+        return {}
+    if key == "citation_snowballing":
+        coverage_warnings = sum(
+            _optional_int(details.get(name)) or 0
+            for name in ("partial seed coverage", "failed seed coverage")
+        )
+        return {"Coverage warnings": coverage_warnings} if coverage_warnings else {}
+    compact: dict[str, int | str] = {}
+    for name in DISPLAY_DETAIL_KEYS.get(key, ()):
+        value = details.get(name)
+        if value not in (None, "", 0, "0"):
+            compact[name] = value
+    return compact
 
 
 def _manual_display_stage(

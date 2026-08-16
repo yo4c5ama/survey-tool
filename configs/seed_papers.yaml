@@ -1,8 +1,8 @@
 # Manual and reviewer-provided seed papers for snowballing.
 #
-# Each item may provide a title, DOI, OpenAlex id, and notes. DOI/OpenAlex id
-# are preferred for exact resolution; title-only seeds are resolved by title
-# search with a conservative similarity check.
+# Each item may provide a title, DOI, Semantic Scholar id, arXiv id, OpenAlex id,
+# and notes. Stable identifiers are preferred for exact resolution; title-only
+# seeds are resolved by title search with a conservative similarity check.
 
 seed_papers:
   - title: Robustness Verification for Transformers

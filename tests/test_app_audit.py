@@ -90,3 +90,58 @@ def test_human_only_queue_respects_preliminary_exclusions(tmp_path: Path) -> Non
     _, queued = create_audit_queue(recommendations, tmp_path / "audit.csv")
 
     assert queued == 1
+
+
+def test_audit_queue_excludes_previously_reviewed_title_across_identifier_changes(
+    tmp_path: Path,
+) -> None:
+    previous = tmp_path / "round_0.csv"
+    with previous.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["title", "year", "doi", "manual_decision"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "title": "Already Reviewed Paper",
+                "year": "2023",
+                "doi": "https://doi.org/10.1/preprint",
+                "manual_decision": "include",
+            }
+        )
+
+    recommendations = tmp_path / "round_1_recommendations.csv"
+    with recommendations.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["title", "year", "doi", "final_recommendation"],
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "title": "Already Reviewed Paper",
+                    "year": "2024",
+                    "doi": "10.1/published",
+                    "final_recommendation": "manual_review",
+                },
+                {
+                    "title": "Genuinely New Paper",
+                    "year": "2025",
+                    "doi": "10.1/new",
+                    "final_recommendation": "manual_review",
+                },
+            ]
+        )
+
+    audit = tmp_path / "round_1.csv"
+    _, queued = create_audit_queue(
+        recommendations,
+        audit,
+        previous_audit_paths=[previous],
+    )
+    _, rows, _ = load_audit(audit)
+
+    assert queued == 1
+    assert [row["title"] for row in rows] == ["Genuinely New Paper"]

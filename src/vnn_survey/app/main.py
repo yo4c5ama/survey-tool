@@ -47,6 +47,30 @@ PAGE_LABELS = {
     "results": "Results",
     "ai_research": "AI research",
 }
+PAGE_DESCRIPTIONS = {
+    "scope": "Research scope and search logic",
+    "ai_settings": (
+        "Choose a model independently for each AI task. Human reviewers retain final authority."
+    ),
+    "run_center": (
+        "Run discovery first. AI screening is a separate, explicitly confirmed stage."
+    ),
+    "manual_review": (
+        "Review candidate papers, record evidence, and make the final inclusion decisions."
+    ),
+    "snowball": (
+        "Only newly included or related papers from the latest review round become seeds. "
+        "Each round collects references and citations, then sends only never-reviewed "
+        "papers to a new review queue."
+    ),
+    "results": (
+        "Inspect the reviewed corpus and export the evidence needed for a reproducible survey."
+    ),
+    "ai_research": (
+        "Study individual papers with their PDFs or classify the final reviewed corpus. "
+        "AI output remains an analytical aid and should be checked by the researcher."
+    ),
+}
 
 MODEL_SUGGESTIONS = [
     "gpt-5.4-mini",
@@ -72,6 +96,13 @@ ABSTRACT_PROVIDER_LABELS = {
     "openalex": "OpenAlex",
     "__disabled__": "Disabled",
 }
+SNOWBALL_PROVIDER_OPTIONS = ["semantic_scholar", "opencitations", "openalex"]
+SNOWBALL_PROVIDER_LABELS = {
+    "semantic_scholar": "Semantic Scholar",
+    "opencitations": "OpenCitations",
+    "openalex": "OpenAlex",
+    "__disabled__": "Disabled",
+}
 
 
 def main() -> None:
@@ -82,17 +113,12 @@ def main() -> None:
 
     projects = store.list_projects()
     _render_sidebar_header()
-    _render_language_selector()
-    _render_backup_restore(store, projects)
     if not projects:
+        _render_language_selector()
+        _render_backup_restore(store, projects)
         st.sidebar.info(_t("Create your first survey project to begin."))
         _render_create_project(store)
-        return
-
-    if st.sidebar.button(_t("New project"), width="stretch", icon=":material/add:"):
-        st.session_state["create_project"] = True
-    if st.session_state.get("create_project"):
-        _render_create_project(store, can_cancel=True)
+        _render_app_footer()
         return
 
     slugs = [project.slug for project in projects]
@@ -108,6 +134,19 @@ def main() -> None:
         key="project_selector",
     )
     st.session_state["project_slug"] = selected_slug
+    if st.sidebar.button(
+        _t("New project"),
+        width="stretch",
+        icon=":material/add:",
+        type="tertiary",
+    ):
+        st.session_state["create_project"] = True
+    if st.session_state.get("create_project"):
+        _render_sidebar_utilities(store, projects)
+        _render_create_project(store, can_cancel=True)
+        _render_app_footer()
+        return
+
     project = store.load_project(selected_slug)
     saved_openalex_key = store.read_openalex_api_key(project.slug)
     if saved_openalex_key:
@@ -123,15 +162,25 @@ def main() -> None:
         os.environ["OPENALEX_EMAIL"] = project.scholarly_api_email
         os.environ["NCBI_EMAIL"] = project.scholarly_api_email
 
+    st.sidebar.markdown(
+        f'<div class="sf-nav-label">{escape(_t("Workspace"))}</div>',
+        unsafe_allow_html=True,
+    )
+    page_ids = list(PAGE_LABELS)
     page = st.sidebar.radio(
         _t("Workspace"),
-        list(PAGE_LABELS),
-        format_func=lambda page_id: _t(PAGE_LABELS[page_id]),
+        page_ids,
+        format_func=lambda page_id: (
+            f"{page_ids.index(page_id) + 1:02d}   {_t(PAGE_LABELS[page_id])}"
+        ),
         label_visibility="collapsed",
         key="workspace_page",
     )
     st.sidebar.divider()
-    _render_sidebar_status(project, service.current_state_or_none(project.slug))
+    state = service.current_state_or_none(project.slug)
+    _render_sidebar_status(project, state)
+    _render_sidebar_utilities(store, projects)
+    _render_page_header(page, project)
 
     if page == "scope":
         _render_scope_page(store, project)
@@ -147,6 +196,7 @@ def main() -> None:
         _render_results(service, project)
     elif page == "ai_research":
         _render_ai_research(store, service, project)
+    _render_app_footer()
 
 
 @st.cache_resource
@@ -165,8 +215,25 @@ def _source_catalog() -> SourceCatalog:
 
 
 def _render_sidebar_header() -> None:
-    st.sidebar.markdown(f"## {APP_NAME}")
-    st.sidebar.caption(_t("Systematic literature review workspace"))
+    caption = escape(_t("Systematic literature review workspace"))
+    st.sidebar.markdown(
+        f"""
+        <div class="sf-brand">
+            <div class="sf-brand-name">{APP_NAME}</div>
+            <div class="sf-brand-caption">{caption}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_sidebar_utilities(
+    store: ProjectStore,
+    projects: list[ProjectSettings],
+) -> None:
+    st.sidebar.divider()
+    _render_language_selector()
+    _render_backup_restore(store, projects)
 
 
 def _render_language_selector() -> None:
@@ -204,9 +271,7 @@ def _render_backup_restore(
                 st.warning(_t("The backup contains API keys, but they were not restored."))
 
         st.caption(
-            _t(
-                "Export every project, run checkpoint, review, PDF, conversation, and analysis."
-            )
+            _t("Export every project, run checkpoint, review, PDF, conversation, and analysis.")
         )
         include_caches = st.checkbox(
             _t("Include rebuildable API caches"),
@@ -299,11 +364,7 @@ def _render_backup_restore(
             _t("Import backup"),
             icon=":material/upload:",
             width="stretch",
-            disabled=(
-                uploaded is None
-                or running
-                or (replace_existing and not replace_confirmed)
-            ),
+            disabled=(uploaded is None or running or (replace_existing and not replace_confirmed)),
         ):
             try:
                 upload_path = save_uploaded_backup(store, uploaded.getvalue())
@@ -326,13 +387,62 @@ def _render_backup_restore(
 
 
 def _render_sidebar_status(project: ProjectSettings, state: dict[str, Any] | None) -> None:
-    st.sidebar.caption(_t("Updated {value}", value=project.updated_at or _t("not yet")))
+    st.sidebar.markdown(
+        f'<div class="sf-nav-label">{escape(_t("Status"))}</div>',
+        unsafe_allow_html=True,
+    )
     if not state:
-        st.sidebar.markdown(f"**{_t('Status')}:** {_t('Not started')}")
+        st.sidebar.markdown(
+            f'<div class="sf-sidebar-status"><span></span>{escape(_t("Not started"))}</div>',
+            unsafe_allow_html=True,
+        )
+        st.sidebar.caption(_t("Updated {value}", value=project.updated_at or _t("not yet")))
         return
     status = _state_label(state.get("status", "unknown"))
-    st.sidebar.markdown(f"**{_t('Status')}:** {status}")
-    st.sidebar.caption(_t("Run {run_id}", run_id=state.get("run_id", "")))
+    st.sidebar.markdown(
+        f'<div class="sf-sidebar-status sf-sidebar-status-active"><span></span>'
+        f"{escape(status)}</div>",
+        unsafe_allow_html=True,
+    )
+    st.sidebar.caption(
+        _t("Run {run_id}", run_id=state.get("run_id", ""))
+        + "  ·  "
+        + _t("Updated {value}", value=project.updated_at or _t("not yet"))
+    )
+
+
+def _render_page_header(
+    page: str,
+    project: ProjectSettings,
+) -> None:
+    page_ids = list(PAGE_LABELS)
+    context = _t(
+        "Step {current} of {total}",
+        current=page_ids.index(page) + 1,
+        total=len(page_ids),
+    )
+    project_context = f"{context}  ·  {project.name}"
+    st.markdown(
+        f'<div class="sf-page-context">{escape(project_context)}</div>',
+        unsafe_allow_html=True,
+    )
+    st.title(_t(PAGE_LABELS[page]))
+    st.markdown(
+        f'<p class="sf-page-description">{escape(_t(PAGE_DESCRIPTIONS[page]))}</p>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_app_footer() -> None:
+    st.markdown(
+        f"""
+        <div class="sf-footer">
+            <span>&copy; {datetime.now().year} yoac</span>
+            <span>{escape(_t("Built with assistance from Codex"))}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_create_project(store: ProjectStore, can_cancel: bool = False) -> None:
@@ -387,9 +497,7 @@ def _render_create_project(store: ProjectStore, can_cancel: bool = False) -> Non
             )
         scope = st.text_area(
             _t("Scope description"),
-            placeholder=_t(
-                "Describe the models, methods, properties, and application boundaries."
-            ),
+            placeholder=_t("Describe the models, methods, properties, and application boundaries."),
             height=110,
             key="create_scope_description",
         )
@@ -467,8 +575,6 @@ def _render_create_project(store: ProjectStore, can_cancel: bool = False) -> Non
 
 
 def _render_scope_page(store: ProjectStore, project: ProjectSettings) -> None:
-    st.title(project.name)
-    st.caption(_t("Research scope and search logic"))
     research_domain, discovery_sources = _render_domain_source_selector(
         prefix=f"scope_{project.slug}",
         current_domain=project.research_domain,
@@ -478,80 +584,88 @@ def _render_scope_page(store: ProjectStore, project: ProjectSettings) -> None:
         [{"Group": group.name, "Terms": "\n".join(group.terms)} for group in project.keyword_groups]
     )
     with st.form("scope_form"):
-        left, right = st.columns([3, 1])
-        with left:
-            name = st.text_input(
-                _t("Project name"), value=project.name, key=f"scope_name_{project.slug}"
-            )
-            question = st.text_area(
-                _t("Research question"),
-                value=project.research_question,
-                height=90,
-                key=f"scope_question_{project.slug}",
-            )
-            scope = st.text_area(
-                _t("Scope description"),
-                value=project.scope_description,
-                height=110,
-                key=f"scope_description_{project.slug}",
-            )
-        with right:
-            start_year = st.number_input(
-                _t("Start year"),
-                min_value=1900,
-                max_value=2100,
-                value=project.year_start,
-                key=f"scope_start_year_{project.slug}",
-            )
-            end_year = st.number_input(
-                _t("End year"),
-                min_value=1900,
-                max_value=2100,
-                value=project.year_end,
-                key=f"scope_end_year_{project.slug}",
-            )
-            include_arxiv = st.checkbox(
-                _t("Keep arXiv / CoRR"),
-                value=project.include_arxiv,
-                key=f"scope_arxiv_{project.slug}",
-            )
-            include_informal = st.checkbox(
-                _t("Keep informal records"),
-                value=project.include_informal,
-                key=f"scope_informal_{project.slug}",
-            )
-        st.markdown(f"**{_t('Keyword groups')}**")
-        st.caption(_t("OR within each row; AND across rows."))
-        edited_groups = st.data_editor(
-            groups_frame,
-            num_rows="dynamic",
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Group": st.column_config.TextColumn(_t("Group name"), required=True),
-                "Terms": st.column_config.TextColumn(
-                    _t("Terms"), required=True, width="large"
-                ),
-            },
-            key=f"scope_groups_{project.slug}",
+        question_tab, keywords_tab, eligibility_tab = st.tabs(
+            [_t("Question"), _t("Keywords"), _t("Criteria")]
         )
-        inclusion = st.text_area(
-            _t("Inclusion criteria, one per line"),
-            value="\n".join(project.inclusion_criteria),
-            height=100,
-            key=f"scope_inclusion_{project.slug}",
-        )
-        exclusion = st.text_area(
-            _t("Exclusion criteria, one per line"),
-            value="\n".join(project.exclusion_criteria),
-            height=100,
-            key=f"scope_exclusion_{project.slug}",
-        )
-        title_exclusions = st.text_input(
-            _t("Title exclusion terms"),
-            value=", ".join(project.title_exclude_terms),
-            key=f"scope_title_exclusions_{project.slug}",
-        )
+        with question_tab:
+            left, right = st.columns([3, 1])
+            with left:
+                name = st.text_input(
+                    _t("Project name"), value=project.name, key=f"scope_name_{project.slug}"
+                )
+                question = st.text_area(
+                    _t("Research question"),
+                    value=project.research_question,
+                    height=90,
+                    key=f"scope_question_{project.slug}",
+                )
+                scope = st.text_area(
+                    _t("Scope description"),
+                    value=project.scope_description,
+                    height=110,
+                    key=f"scope_description_{project.slug}",
+                )
+            with right:
+                start_year = st.number_input(
+                    _t("Start year"),
+                    min_value=1900,
+                    max_value=2100,
+                    value=project.year_start,
+                    key=f"scope_start_year_{project.slug}",
+                )
+                end_year = st.number_input(
+                    _t("End year"),
+                    min_value=1900,
+                    max_value=2100,
+                    value=project.year_end,
+                    key=f"scope_end_year_{project.slug}",
+                )
+                include_arxiv = st.checkbox(
+                    _t("Keep arXiv / CoRR"),
+                    value=project.include_arxiv,
+                    key=f"scope_arxiv_{project.slug}",
+                )
+                include_informal = st.checkbox(
+                    _t("Keep informal records"),
+                    value=project.include_informal,
+                    key=f"scope_informal_{project.slug}",
+                )
+        with keywords_tab:
+            st.caption(_t("OR within each row; AND across rows."))
+            edited_groups = st.data_editor(
+                groups_frame,
+                num_rows="dynamic",
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Group": st.column_config.TextColumn(_t("Group name"), required=True),
+                    "Terms": st.column_config.TextColumn(
+                        _t("Terms"), required=True, width="large"
+                    ),
+                },
+                key=f"scope_groups_{project.slug}",
+            )
+        with eligibility_tab:
+            criteria_columns = st.columns(2)
+            with criteria_columns[0]:
+                inclusion = st.text_area(
+                    _t("Inclusion criteria, one per line"),
+                    value="\n".join(project.inclusion_criteria),
+                    height=180,
+                    key=f"scope_inclusion_{project.slug}",
+                )
+            with criteria_columns[1]:
+                exclusion = st.text_area(
+                    _t("Exclusion criteria, one per line"),
+                    value="\n".join(project.exclusion_criteria),
+                    height=180,
+                    key=f"scope_exclusion_{project.slug}",
+                )
+            title_exclusions = st.text_input(
+                _t("Title exclusion terms"),
+                value=", ".join(project.title_exclude_terms),
+                key=f"scope_title_exclusions_{project.slug}",
+            )
         saved = st.form_submit_button(_t("Save scope"), type="primary")
     if saved:
         try:
@@ -606,55 +720,121 @@ def _render_scope_page(store: ProjectStore, project: ProjectSettings) -> None:
 
 
 def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
-    st.title(_t("AI settings"))
-    st.write(
-        _t(
-            "Configure separate models for screening, PDF Q&A, and corpus classification. "
-            "Human reviewers retain final authority."
-        )
+    models_tab, enrichment_tab, credentials_tab, screening_prompt_tab = st.tabs(
+        [_t("Models"), _t("Abstract enrichment"), _t("API key"), _t("Screening prompt")]
     )
+    with models_tab:
+        _render_ai_model_settings(store, project)
+    with enrichment_tab:
+        _render_abstract_enrichment_settings(store, project)
+    with credentials_tab:
+        _render_api_key_settings(store, project)
+    with screening_prompt_tab:
+        _render_screening_prompt_settings(store, project)
+
+
+def _render_ai_model_settings(store: ProjectStore, project: ProjectSettings) -> None:
     base_url = st.text_input(
         _t("Base URL"), value=project.llm_base_url, key=f"ai_base_url_{project.slug}"
     )
     fetched_models = st.session_state.get(f"available_models_{project.slug}", [])
-    model_columns = st.columns(3)
-    with model_columns[0]:
-        model = _render_model_selector(
-            _t("Screening model"),
-            project.llm_model,
-            key=f"ai_screening_model_{project.slug}",
-            fetched_models=fetched_models,
-            help_text=_t("Used for title and abstract screening."),
-        )
-    with model_columns[1]:
-        paper_model = _render_model_selector(
-            _t("Paper Q&A model"),
-            project.paper_qa_model,
-            key=f"ai_paper_model_{project.slug}",
-            fetched_models=fetched_models,
-            help_text=_t("Used for questions about an uploaded paper PDF."),
-        )
-    with model_columns[2]:
-        corpus_model = _render_model_selector(
-            _t("Corpus analysis model"),
-            project.corpus_analysis_model,
-            key=f"ai_corpus_model_{project.slug}",
-            fetched_models=fetched_models,
-            help_text=_t("Used to design a taxonomy and classify the final corpus."),
-        )
+    screening_tab, prompt_tab, research_tab = st.tabs(
+        [_t("Screening"), _t("Prompt learning"), _t("Research analysis")]
+    )
+    with screening_tab:
+        model_columns = st.columns(2)
+        with model_columns[0]:
+            title_model = _render_model_selector(
+                _t("Title screening model"),
+                project.title_screening_model,
+                key=f"ai_title_screening_model_{project.slug}",
+                fetched_models=fetched_models,
+                help_text=_t("Used only for high-recall title prescreening."),
+            )
+        with model_columns[1]:
+            model = _render_model_selector(
+                _t("Abstract screening model"),
+                project.llm_model,
+                key=f"ai_abstract_screening_model_{project.slug}",
+                fetched_models=fetched_models,
+                help_text=_t("Used for the main abstract-level screening stage."),
+            )
+    with prompt_tab:
+        model_columns = st.columns(2)
+        with model_columns[0]:
+            prompt_model = _render_model_selector(
+                _t("Prompt refinement model"),
+                project.prompt_refinement_model,
+                key=f"ai_prompt_refinement_model_{project.slug}",
+                fetched_models=fetched_models,
+                help_text=_t("Learns a proposed prompt from cumulative human decisions."),
+            )
+        with model_columns[1]:
+            replay_model = _render_model_selector(
+                _t("Historical replay model"),
+                project.prompt_replay_model,
+                key=f"ai_prompt_replay_model_{project.slug}",
+                fetched_models=fetched_models,
+                help_text=_t("Used for the one-time replay of initial AI exclusions."),
+            )
+    with research_tab:
+        model_columns = st.columns(2)
+        with model_columns[0]:
+            paper_model = _render_model_selector(
+                _t("Paper Q&A model"),
+                project.paper_qa_model,
+                key=f"ai_paper_model_{project.slug}",
+                fetched_models=fetched_models,
+                help_text=_t("Used for questions about an uploaded paper PDF."),
+            )
+        with model_columns[1]:
+            corpus_model = _render_model_selector(
+                _t("Corpus analysis model"),
+                project.corpus_analysis_model,
+                key=f"ai_corpus_model_{project.slug}",
+                fetched_models=fetched_models,
+                help_text=_t("Used to design a taxonomy and classify the final corpus."),
+            )
+    screen_batch_size = st.number_input(
+        _t("Abstracts per AI screening batch"),
+        min_value=1,
+        max_value=50,
+        value=min(max(project.llm_screen_batch_size, 1), 50),
+        help=_t(
+            "Each request screens this many abstracts when possible. Failed batches are "
+            "automatically divided so successful papers are preserved."
+        ),
+        key=f"llm_screen_batch_size_{project.slug}",
+    )
     if st.button(_t("Save model settings"), type="primary"):
-        if not all([model.strip(), paper_model.strip(), corpus_model.strip()]):
+        if not all(
+            [
+                title_model.strip(),
+                model.strip(),
+                prompt_model.strip(),
+                replay_model.strip(),
+                paper_model.strip(),
+                corpus_model.strip(),
+            ]
+        ):
             st.error(_t("Every AI task requires a model."))
         else:
+            project.title_screening_model = title_model.strip()
             project.llm_model = model.strip()
+            project.prompt_refinement_model = prompt_model.strip()
+            project.prompt_replay_model = replay_model.strip()
             project.paper_qa_model = paper_model.strip()
             project.corpus_analysis_model = corpus_model.strip()
             project.llm_base_url = base_url.strip()
+            project.llm_screen_batch_size = int(screen_batch_size)
             store.save_project(project)
             st.success(_t("Model settings saved."))
 
-    st.divider()
-    st.subheader(_t("Abstract enrichment"))
+
+def _render_abstract_enrichment_settings(
+    store: ProjectStore,
+    project: ProjectSettings,
+) -> None:
     st.caption(
         _t(
             "Abstracts already returned by discovery are always used first. Configure the "
@@ -721,8 +901,8 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
                 os.environ["NCBI_EMAIL"] = project.scholarly_api_email
             st.success(_t("Abstract settings saved."))
 
-    st.divider()
-    st.subheader(_t("API key"))
+
+def _render_api_key_settings(store: ProjectStore, project: ProjectSettings) -> None:
     saved_key = store.read_api_key(project.slug)
     api_key = st.text_input(
         _t("OpenAI API key"),
@@ -737,7 +917,7 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
     first, second, third = st.columns(3)
     with first:
         if st.button(_t("Test connection"), width="stretch"):
-            ok, message = test_openai_connection(base_url, key_for_action)
+            ok, message = test_openai_connection(project.llm_base_url, key_for_action)
             (st.success if ok else st.error)(_runtime_text(message))
     with second:
         if st.button(_t("Apply API key"), width="stretch"):
@@ -747,12 +927,10 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
                 os.environ["OPENAI_API_KEY"] = api_key.strip()
                 if remember:
                     store.save_api_key(project.slug, api_key)
-                st.success(
-                    _t("The API key is ready. It is never written to project YAML or logs.")
-                )
+                st.success(_t("The API key is ready. It is never written to project YAML or logs."))
     with third:
         if st.button(_t("Refresh model list"), width="stretch"):
-            models, message = list_openai_models(base_url, key_for_action)
+            models, message = list_openai_models(project.llm_base_url, key_for_action)
             if models:
                 st.session_state[f"available_models_{project.slug}"] = models
                 st.success(_t("Loaded {count} models.", count=len(models)))
@@ -766,111 +944,111 @@ def _render_ai_settings(store: ProjectStore, project: ProjectSettings) -> None:
         )
     )
 
-    st.markdown(f"**{_t('Semantic Scholar API key')}**")
-    saved_semantic_scholar_key = store.read_semantic_scholar_api_key(project.slug)
-    semantic_scholar_key = st.text_input(
-        _t("Semantic Scholar API key"),
-        type="password",
-        placeholder=(
-            _t("A key is already saved")
-            if saved_semantic_scholar_key
-            else _t("Optional, but recommended for a dedicated rate limit")
-        ),
-        key=f"semantic_scholar_api_key_{project.slug}",
-        label_visibility="collapsed",
-    )
-    semantic_columns = st.columns(2)
-    with semantic_columns[0]:
+    with st.expander(_t("Semantic Scholar API key")):
+        saved_semantic_scholar_key = store.read_semantic_scholar_api_key(project.slug)
+        semantic_scholar_key = st.text_input(
+            _t("Semantic Scholar API key"),
+            type="password",
+            placeholder=(
+                _t("A key is already saved")
+                if saved_semantic_scholar_key
+                else _t("Optional, but recommended for a dedicated rate limit")
+            ),
+            key=f"semantic_scholar_api_key_{project.slug}",
+            label_visibility="collapsed",
+        )
+        semantic_columns = st.columns(2)
+        with semantic_columns[0]:
+            if st.button(
+                _t("Apply Semantic Scholar key"),
+                width="stretch",
+                key=f"apply_semantic_scholar_key_{project.slug}",
+            ):
+                if not semantic_scholar_key.strip():
+                    st.error(_t("Enter a new Semantic Scholar API key before applying it."))
+                else:
+                    os.environ["SEMANTIC_SCHOLAR_API_KEY"] = semantic_scholar_key.strip()
+                    store.save_semantic_scholar_api_key(project.slug, semantic_scholar_key)
+                    st.success(_t("The Semantic Scholar API key is ready."))
+        with semantic_columns[1]:
+            st.link_button(
+                _t("Request a Semantic Scholar key"),
+                "https://www.semanticscholar.org/product/api",
+                width="stretch",
+            )
+
+    with st.expander(_t("NCBI API key")):
+        saved_ncbi_key = store.read_ncbi_api_key(project.slug)
+        ncbi_key = st.text_input(
+            _t("NCBI API key"),
+            type="password",
+            placeholder=(
+                _t("A key is already saved")
+                if saved_ncbi_key
+                else _t("Optional; PubMed batching works without a key")
+            ),
+            key=f"ncbi_api_key_{project.slug}",
+            label_visibility="collapsed",
+        )
         if st.button(
-            _t("Apply Semantic Scholar key"),
+            _t("Apply NCBI key"),
             width="stretch",
-            key=f"apply_semantic_scholar_key_{project.slug}",
+            key=f"apply_ncbi_key_{project.slug}",
         ):
-            if not semantic_scholar_key.strip():
-                st.error(_t("Enter a new Semantic Scholar API key before applying it."))
+            if not ncbi_key.strip():
+                st.error(_t("Enter a new NCBI API key before applying it."))
             else:
-                os.environ["SEMANTIC_SCHOLAR_API_KEY"] = semantic_scholar_key.strip()
-                store.save_semantic_scholar_api_key(project.slug, semantic_scholar_key)
-                st.success(_t("The Semantic Scholar API key is ready."))
-    with semantic_columns[1]:
-        st.link_button(
-            _t("Request a Semantic Scholar key"),
-            "https://www.semanticscholar.org/product/api",
-            width="stretch",
+                os.environ["NCBI_API_KEY"] = ncbi_key.strip()
+                store.save_ncbi_api_key(project.slug, ncbi_key)
+                st.success(_t("The NCBI API key is ready."))
+
+    with st.expander(_t("OpenAlex API key")):
+        saved_openalex_key = store.read_openalex_api_key(project.slug)
+        openalex_key = st.text_input(
+            _t("OpenAlex API key"),
+            type="password",
+            placeholder=(
+                _t("A key is already saved")
+                if saved_openalex_key
+                else _t("Enter your OpenAlex API key")
+            ),
+            key=f"openalex_api_key_{project.slug}",
+            label_visibility="collapsed",
+        )
+        openalex_remember = st.checkbox(
+            _t("Save this OpenAlex key on this computer"),
+            value=True,
+            key=f"openalex_remember_{project.slug}",
+        )
+        openalex_columns = st.columns(2)
+        with openalex_columns[0]:
+            if st.button(
+                _t("Apply OpenAlex key"),
+                width="stretch",
+                key=f"apply_openalex_key_{project.slug}",
+            ):
+                if not openalex_key.strip():
+                    st.error(_t("Enter a new OpenAlex API key before applying it."))
+                else:
+                    os.environ["OPENALEX_API_KEY"] = openalex_key.strip()
+                    if openalex_remember:
+                        store.save_openalex_api_key(project.slug, openalex_key)
+                    st.success(_t("The OpenAlex API key is ready."))
+        with openalex_columns[1]:
+            st.link_button(
+                _t("Get a free OpenAlex key"),
+                "https://openalex.org/settings/api",
+                width="stretch",
+            )
+        st.caption(
+            _t(
+                "OpenAlex now requires a free API key for sustained discovery and abstract "
+                "enrichment. The key is stored with the same local protection as the OpenAI key."
+            )
         )
 
-    st.markdown(f"**{_t('NCBI API key')}**")
-    saved_ncbi_key = store.read_ncbi_api_key(project.slug)
-    ncbi_key = st.text_input(
-        _t("NCBI API key"),
-        type="password",
-        placeholder=(
-            _t("A key is already saved")
-            if saved_ncbi_key
-            else _t("Optional; PubMed batching works without a key")
-        ),
-        key=f"ncbi_api_key_{project.slug}",
-        label_visibility="collapsed",
-    )
-    if st.button(
-        _t("Apply NCBI key"),
-        width="stretch",
-        key=f"apply_ncbi_key_{project.slug}",
-    ):
-        if not ncbi_key.strip():
-            st.error(_t("Enter a new NCBI API key before applying it."))
-        else:
-            os.environ["NCBI_API_KEY"] = ncbi_key.strip()
-            store.save_ncbi_api_key(project.slug, ncbi_key)
-            st.success(_t("The NCBI API key is ready."))
 
-    st.markdown(f"**{_t('OpenAlex API key')}**")
-    saved_openalex_key = store.read_openalex_api_key(project.slug)
-    openalex_key = st.text_input(
-        _t("OpenAlex API key"),
-        type="password",
-        placeholder=(
-            _t("A key is already saved")
-            if saved_openalex_key
-            else _t("Enter your OpenAlex API key")
-        ),
-        key=f"openalex_api_key_{project.slug}",
-        label_visibility="collapsed",
-    )
-    openalex_remember = st.checkbox(
-        _t("Save this OpenAlex key on this computer"),
-        value=True,
-        key=f"openalex_remember_{project.slug}",
-    )
-    openalex_columns = st.columns(2)
-    with openalex_columns[0]:
-        if st.button(
-            _t("Apply OpenAlex key"),
-            width="stretch",
-            key=f"apply_openalex_key_{project.slug}",
-        ):
-            if not openalex_key.strip():
-                st.error(_t("Enter a new OpenAlex API key before applying it."))
-            else:
-                os.environ["OPENALEX_API_KEY"] = openalex_key.strip()
-                if openalex_remember:
-                    store.save_openalex_api_key(project.slug, openalex_key)
-                st.success(_t("The OpenAlex API key is ready."))
-    with openalex_columns[1]:
-        st.link_button(
-            _t("Get a free OpenAlex key"),
-            "https://openalex.org/settings/api",
-            width="stretch",
-        )
-    st.caption(
-        _t(
-            "OpenAlex now requires a free API key for sustained discovery and abstract "
-            "enrichment. The key is stored with the same local protection as the OpenAI key."
-        )
-    )
-
-    st.divider()
-    st.subheader(_t("Screening prompt"))
+def _render_screening_prompt_settings(store: ProjectStore, project: ProjectSettings) -> None:
     prompt = store.system_prompt_path(project.slug).read_text(encoding="utf-8")
     prompt_key = f"ai_prompt_{project.slug}"
     if st.session_state.pop(f"{prompt_key}_reset_success", False):
@@ -914,8 +1092,6 @@ def _render_run_center(
     service: PipelineService,
     project: ProjectSettings,
 ) -> None:
-    st.title(_t("Run center"))
-    st.write(_t("Run discovery first. AI screening is a separate, explicitly confirmed stage."))
     state = service.current_state_or_none(project.slug)
     task = _task_manager().snapshot(project.slug)
     if state or task:
@@ -926,7 +1102,8 @@ def _render_run_center(
         )
     if state:
         _render_literature_flow(state)
-        _render_round_overview(state)
+        with st.expander(_t("Show round history")):
+            _render_round_overview(state)
 
     if not state:
         if task and task.running:
@@ -936,12 +1113,25 @@ def _render_run_center(
         return
 
     if task and task.running:
-        st.info(_t("This run continues in the background. You can safely visit another page."))
         return
 
     latest = state["rounds"][-1]
     status = latest.get("status")
-    if status == "discovery_complete":
+    citation_warnings = bool(
+        latest.get("kind") == "snowball"
+        and (
+            _citation_failure_count(latest)
+            or int(latest.get("counts", {}).get("coverage_issue_seeds", 0) or 0)
+        )
+    )
+    if citation_warnings or status == "citation_incomplete":
+        st.warning(
+            _t(
+                "Some seed papers have citation coverage warnings. Available candidates "
+                "are saved and can continue to AI screening and manual review."
+            )
+        )
+    if status in {"discovery_complete", "citation_incomplete"}:
         _review_preparation_panel(store, service, project, latest)
     elif status == "ready_for_review":
         st.success(_t("The current review queue is ready. Continue on the Manual review page."))
@@ -1008,9 +1198,7 @@ def _initial_discovery_form(
             value=True,
             key=f"core_online_{compact}",
         )
-    has_api_key = service.store.has_api_key(project.slug) or bool(
-        os.environ.get("OPENAI_API_KEY")
-    )
+    has_api_key = service.store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
     title_columns = st.columns([2, 1])
     with title_columns[0]:
         use_title_llm = st.toggle(
@@ -1070,10 +1258,29 @@ def _render_manual_additions(
     target_round_index: int | None = None,
 ) -> None:
     if embedded:
-        st.divider()
-        st.subheader(_t("Add papers"))
-    else:
-        st.title(_t("Add papers"))
+        with st.expander(_t("Add papers")):
+            _render_manual_additions_content(
+                store,
+                service,
+                project,
+                target_round_index=target_round_index,
+            )
+        return
+    _render_manual_additions_content(
+        store,
+        service,
+        project,
+        target_round_index=target_round_index,
+    )
+
+
+def _render_manual_additions_content(
+    store: ProjectStore,
+    service: PipelineService,
+    project: ProjectSettings,
+    *,
+    target_round_index: int | None = None,
+) -> None:
     st.write(
         _t(
             "Add known papers that automatic searches missed. Confirm a metadata match or "
@@ -1085,7 +1292,7 @@ def _render_manual_additions(
     records = manual_store.load()
     state = service.current_state_or_none(project.slug)
     task = _task_manager().snapshot(project.slug)
-    if task and task.running:
+    if task and task.running and task.operation in {"manual_additions", "manual_enrichment"}:
         _render_current_run_progress(
             project.slug,
             service,
@@ -1281,9 +1488,7 @@ def _render_manual_additions(
             if target_round_index is not None
             else int(
                 next(
-                    item
-                    for item in reversed(state["rounds"])
-                    if item.get("files", {}).get("audit")
+                    item for item in reversed(state["rounds"]) if item.get("files", {}).get("audit")
                 )["index"]
             )
         )
@@ -1308,9 +1513,7 @@ def _render_manual_additions(
             _t("Enriched manual papers"),
             enrichment_status["enriched"],
         )
-        has_ai_key = store.has_api_key(project.slug) or bool(
-            os.environ.get("OPENAI_API_KEY")
-        )
+        has_ai_key = store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
         if not has_ai_key:
             st.warning(_t("Add an API key on the AI settings page before continuing."))
         if st.button(
@@ -1319,9 +1522,7 @@ def _render_manual_additions(
             icon=":material/play_arrow:",
             width="stretch",
             disabled=(
-                not enrichment_status["pending"]
-                or bool(task and task.running)
-                or not has_ai_key
+                not enrichment_status["pending"] or bool(task and task.running) or not has_ai_key
             ),
             key=f"manual_enrichment_start_{project.slug}_{active_round_index}",
         ):
@@ -1370,41 +1571,125 @@ def _review_preparation_panel(
     round_state: dict[str, Any],
 ) -> None:
     round_index = int(round_state["index"])
-    estimate = service.estimate_llm_usage(project.slug, round_index)
     st.subheader(_t("Prepare round {round_index} for review", round_index=round_index))
-    metrics = st.columns(3)
+    has_ai_key = store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
+    controls = st.columns([2, 1])
+    with controls[0]:
+        use_llm = st.toggle(
+            _t("Use AI abstract screening"),
+            value=has_ai_key,
+            key=f"use_llm_{round_state.get('index')}_{project.slug}",
+        )
+    with controls[1]:
+        llm_limit = st.number_input(
+            _t("AI paper limit"),
+            min_value=0,
+            value=0,
+            help=_t("Use 0 for every eligible paper. A small limit is useful for testing."),
+            key=f"llm_limit_{round_state.get('index')}_{project.slug}",
+        )
+
+    replay_pending = service.prompt_replay_pending_for_round(project.slug, round_index)
+    if replay_pending:
+        st.info(
+            _t(
+                "The approved prompt will re-screen eligible historical exclusions before "
+                "this review queue is created."
+            )
+        )
+
+    refresh_error = ""
+    if st.button(
+        _t("Refresh model price"),
+        icon=":material/refresh:",
+        key=f"refresh_model_price_{round_index}_{project.slug}",
+    ):
+        try:
+            service.refresh_llm_model_price(project.slug)
+            st.toast(_t("The model price was refreshed from the official OpenAI model page."))
+        except RuntimeError as exc:
+            refresh_error = str(exc)
+    if refresh_error:
+        st.warning(
+            _t(
+                "The live price could not be refreshed. The local fallback remains active: "
+                "{error}",
+                error=_runtime_text(refresh_error),
+            )
+        )
+
+    estimate = service.estimate_llm_usage(
+        project.slug,
+        round_index,
+        llm_limit=_none_if_zero(llm_limit),
+    )
+    metrics = st.columns(4)
     metrics[0].metric(_t("Papers eligible for AI"), f"{estimate['papers']:,}")
-    metrics[1].metric(
-        _t("Estimated input tokens"), f"{estimate['estimated_input_tokens']:,}"
+    metrics[1].metric(_t("Estimated input tokens"), f"{estimate['estimated_input_tokens']:,}")
+    metrics[2].metric(_t("Estimated output tokens"), f"{estimate['estimated_output_tokens']:,}")
+    metrics[3].metric(
+        _t("Estimated cost"),
+        _format_usd_estimate(estimate["estimated_cost_usd"]),
     )
-    metrics[2].metric(
-        _t("Maximum output tokens"), f"{estimate['maximum_output_tokens']:,}"
+    price = estimate.get("price")
+    if price:
+        source_label = (
+            _t("Official OpenAI price")
+            if price.get("source") == "openai_official"
+            else _t("Local fallback price")
+        )
+        st.caption(
+            _t(
+                "{model}: ${input_price} input and ${output_price} output per 1M tokens. "
+                "{source}, updated {updated_at}.",
+                model=estimate["model"],
+                input_price=f"{price['input_per_million']:g}",
+                output_price=f"{price['output_per_million']:g}",
+                source=source_label,
+                updated_at=price.get("updated_at") or _t("not yet"),
+            )
+        )
+        st.caption(
+            _t(
+                "Estimated upper bound at the configured output limit: {cost}.",
+                cost=_format_usd_estimate(estimate["maximum_cost_usd"]),
+            )
+        )
+    else:
+        st.caption(
+            _t(
+                "No price is available for {model}. Add it to configs/model_pricing.yaml.",
+                model=estimate["model"],
+            )
+        )
+    st.caption(
+        _t(
+            "AI abstract screening will use batches of up to {batch_size} papers "
+            "(about {requests} requests before retries).",
+            batch_size=estimate["batch_size"],
+            requests=estimate["estimated_requests"],
+        )
     )
-    use_llm = st.toggle(
-        _t("Use AI abstract screening"),
-        value=store.has_api_key(project.slug),
-        key=f"use_llm_{round_state.get('index')}_{project.slug}",
+    st.caption(
+        _t(
+            "The estimate covers abstract screening only and excludes retries, cached-input "
+            "discounts, and optional historical replay."
+        )
     )
-    llm_limit = st.number_input(
-        _t("AI paper limit"),
-        min_value=0,
-        value=0,
-        help=_t("Use 0 for every eligible paper. A small limit is useful for testing."),
-        key=f"llm_limit_{round_state.get('index')}_{project.slug}",
-    )
-    if use_llm and not store.has_api_key(project.slug) and not os.environ.get("OPENAI_API_KEY"):
+    if (use_llm or replay_pending) and not has_ai_key:
         st.warning(_t("Add an API key on the AI settings page before continuing."))
     button_label = (
         _t("Run AI screening and create review queue")
         if use_llm
+        else _t("Run historical replay and create review queue")
+        if replay_pending
         else _t("Create human-only review queue")
     )
     if st.button(
         button_label,
         type="primary",
-        disabled=use_llm
-        and not store.has_api_key(project.slug)
-        and not os.environ.get("OPENAI_API_KEY"),
+        disabled=(use_llm or replay_pending) and not has_ai_key,
+        key=f"prepare_review_{round_index}_{project.slug}",
     ):
         started = _task_manager().start(
             project.slug,
@@ -1426,29 +1711,77 @@ def _render_manual_review(
     service: PipelineService,
     project: ProjectSettings,
 ) -> None:
-    st.title(_t("Manual review"))
     state = service.current_state_or_none(project.slug)
     if not state:
         st.info(_t("Run initial discovery before opening the review workspace."))
         _render_manual_additions(store, service, project, embedded=True)
         return
+    task = _task_manager().snapshot(project.slug)
+    if task and task.running and task.operation == "review_preparation":
+        _render_current_run_progress(
+            project.slug,
+            service,
+            widget_scope="manual_review",
+        )
+        return
+    latest_round = state["rounds"][-1]
+    pending_review_round = bool(
+        latest_round.get("kind") == "snowball"
+        and latest_round.get("status") in {"discovery_complete", "citation_incomplete"}
+        and latest_round.get("files", {}).get("enriched")
+        and not latest_round.get("files", {}).get("audit")
+    )
+    if pending_review_round:
+        st.warning(
+            _t(
+                "Snowball round {round_index} has candidates that are not yet in a manual "
+                "review round. Prepare the queue below.",
+                round_index=latest_round.get("index", ""),
+            )
+        )
+        _review_preparation_panel(store, service, project, latest_round)
+        st.divider()
     review_rounds = [item for item in state["rounds"] if item.get("files", {}).get("audit")]
     if not review_rounds:
-        st.info(_t("Prepare the current round for review in the Run center."))
+        if not pending_review_round:
+            st.info(_t("Prepare the current round for review in the Run center."))
         _render_manual_additions(store, service, project, embedded=True)
         return
     indexes = [int(item["index"]) for item in review_rounds]
+    selection_key = f"audit_round_{state['run_id']}"
+    latest_marker_key = f"latest_audit_round_{state['run_id']}"
+    latest_audit_round = indexes[-1]
+    if st.session_state.get(latest_marker_key) != latest_audit_round:
+        st.session_state[selection_key] = latest_audit_round
+        st.session_state[latest_marker_key] = latest_audit_round
     round_index = st.selectbox(
         _t("Audit round"),
         indexes,
         index=len(indexes) - 1,
-        key=f"audit_round_{state['run_id']}",
+        key=selection_key,
     )
     round_state = next(item for item in review_rounds if int(item["index"]) == round_index)
+    removed_duplicates = service.reconcile_snowball_audit(project.slug, round_index)
+    if removed_duplicates:
+        st.info(
+            _t(
+                "Removed {count} papers already reviewed in earlier rounds. A backup of the "
+                "previous audit file was saved.",
+                count=removed_duplicates,
+            )
+        )
     audit_path = Path(round_state["files"]["audit"])
     _, rows, summary = load_audit(audit_path)
     metric_slots = [column.empty() for column in st.columns(5)]
     _render_audit_metrics(metric_slots, summary)
+    if round_state.get("kind") == "snowball":
+        st.caption(
+            _t(
+                "Seed citation coverage describes whether citation providers completed "
+                "backward and forward retrieval for the seed that discovered a candidate. "
+                "It is not a relevance or quality judgment about the candidate paper."
+            )
+        )
 
     frame = pd.DataFrame(rows).fillna("")
     filter_col, decision_col = st.columns([2, 1])
@@ -1473,6 +1806,10 @@ def _render_manual_review(
             "venue_type",
             "core_rank",
             "impact_factor",
+            "snowball_coverage_status",
+            "snowball_missing_providers",
+            "snowball_seed_titles",
+            "snowball_provider",
             "llm_decision",
             "llm_confidence",
             "llm_reason",
@@ -1488,6 +1825,10 @@ def _render_manual_review(
         editor_frame["llm_decision"] = editor_frame["llm_decision"].map(_decision_label)
     if "venue_type" in editor_frame:
         editor_frame["venue_type"] = editor_frame["venue_type"].map(_value_label)
+    if "snowball_coverage_status" in editor_frame:
+        editor_frame["snowball_coverage_status"] = editor_frame["snowball_coverage_status"].map(
+            _state_label
+        )
     edited = st.data_editor(
         editor_frame,
         hide_index=True,
@@ -1505,6 +1846,26 @@ def _render_manual_review(
             "venue_type": st.column_config.TextColumn(_t("Venue type")),
             "core_rank": st.column_config.TextColumn(_t("CORE rank")),
             "impact_factor": st.column_config.TextColumn(_t("Impact Factor")),
+            "snowball_coverage_status": st.column_config.TextColumn(
+                _t("Seed citation coverage"),
+                width="medium",
+                help=_t(
+                    "Complete means all required provider queries succeeded; partial means "
+                    "some succeeded; failed means the seed could not be expanded."
+                ),
+            ),
+            "snowball_missing_providers": st.column_config.TextColumn(
+                _t("Missing citation providers"),
+                width="large",
+            ),
+            "snowball_seed_titles": st.column_config.TextColumn(
+                _t("Snowball seeds"),
+                width="large",
+            ),
+            "snowball_provider": st.column_config.TextColumn(
+                _t("Citation providers"),
+                width="medium",
+            ),
             "llm_decision": st.column_config.TextColumn(_t("AI decision")),
             "llm_confidence": st.column_config.TextColumn(_t("AI confidence")),
             "manual_decision": st.column_config.SelectboxColumn(
@@ -1538,28 +1899,45 @@ def _render_manual_review(
             icon=":material/check:",
         )
 
-    st.download_button(
-        _t("Download this audit CSV"),
-        data=audit_path.read_bytes(),
-        file_name=audit_path.name,
-        mime="text/csv",
-        icon=":material/download:",
+    download_columns = st.columns(2)
+    with download_columns[0]:
+        st.download_button(
+            _t("Download this audit CSV"),
+            data=audit_path.read_bytes(),
+            file_name=audit_path.name,
+            mime="text/csv",
+            icon=":material/download:",
+            width="stretch",
+        )
+    with download_columns[1]:
+        _render_run_log_download(
+            service,
+            project.slug,
+            key=f"audit_run_log_{state['run_id']}_{round_index}",
+        )
+
+    _render_prompt_refinement(store, service, project)
+
+    with st.expander(_t("Paper reader")):
+        _render_review_paper_reader(rows, frame, state, round_index)
+
+    _render_manual_additions(
+        store,
+        service,
+        project,
+        embedded=True,
+        target_round_index=round_index,
     )
 
-    if round_index == 0:
-        _render_prompt_refinement(store, service, project)
 
-    st.divider()
-    st.subheader(_t("Paper reader"))
+def _render_review_paper_reader(
+    rows: list[dict[str, str]],
+    frame: pd.DataFrame,
+    state: dict[str, Any],
+    round_index: int,
+) -> None:
     if frame.empty:
         st.info(_t("This round contains no new papers."))
-        _render_manual_additions(
-            store,
-            service,
-            project,
-            embedded=True,
-            target_round_index=round_index,
-        )
         return
     labels = [f"{row.get('year', '')} · {row.get('title', '')}" for row in rows]
     selected = st.selectbox(
@@ -1579,22 +1957,12 @@ def _render_manual_review(
         if paper.get("llm_evidence"):
             st.caption(_t("Evidence: {evidence}", evidence=paper.get("llm_evidence")))
 
-    _render_manual_additions(
-        store,
-        service,
-        project,
-        embedded=True,
-        target_round_index=round_index,
-    )
-
 
 def _render_audit_metrics(metric_slots: list[Any], summary: AuditSummary) -> None:
     metric_slots[0].metric(_t("Candidates"), summary.total)
     metric_slots[1].metric(_t("Reviewed"), summary.reviewed)
     metric_slots[2].metric(_t("Include"), summary.by_decision.get("include", 0))
-    metric_slots[3].metric(
-        _t("Related"), summary.by_decision.get("include_related", 0)
-    )
+    metric_slots[3].metric(_t("Related"), summary.by_decision.get("include_related", 0))
     metric_slots[4].metric(_t("Exclude"), summary.by_decision.get("exclude", 0))
 
 
@@ -1602,31 +1970,59 @@ def _render_prompt_refinement(
     store: ProjectStore,
     service: PipelineService,
     project: ProjectSettings,
+    *,
+    embedded: bool = False,
 ) -> None:
-    st.divider()
-    st.subheader(_t("Refine screening prompt from human decisions"))
+    if not embedded:
+        with st.expander(_t("Refine screening prompt from human decisions")):
+            _render_prompt_refinement_content(store, service, project, show_heading=False)
+        return
+    _render_prompt_refinement_content(store, service, project, show_heading=True)
+
+
+def _render_prompt_refinement_content(
+    store: ProjectStore,
+    service: PipelineService,
+    project: ProjectSettings,
+    *,
+    show_heading: bool,
+) -> None:
+    if show_heading:
+        st.subheader(_t("Refine screening prompt from human decisions"))
     st.write(
         _t(
-            "After the initial audit is complete, AI can compare the human decisions with "
-            "the current screening prompt and propose a revision. The active prompt changes "
-            "only after human approval."
+            "After each completed audit round, AI can learn from all human decisions and "
+            "reviewer notes collected so far. The active prompt changes only after human "
+            "approval."
         )
     )
     overview = service.prompt_refinement_overview(project.slug)
     metrics = st.columns(3)
     metrics[0].metric(_t("Audited papers"), overview["audit_total"])
-    metrics[1].metric(_t("Decisions remaining"), overview["unreviewed"])
-    metrics[2].metric(
-        _t("Initial AI exclusions eligible for replay"),
-        overview["initial_ai_exclusions"],
+    metrics[1].metric(_t("Audit rounds"), overview["audit_rounds"])
+    metrics[2].metric(_t("Decisions remaining"), overview["unreviewed"])
+    st.caption(
+        _t(
+            "Historical replay pool: {source} initial AI exclusions - {reviewed} already "
+            "human-reviewed = {eligible} eligible papers.",
+            source=(overview["initial_ai_exclusions"] + overview["reviewed_removed_before_replay"]),
+            reviewed=overview["reviewed_removed_before_replay"],
+            eligible=overview["initial_ai_exclusions"],
+        )
+    )
+    st.caption(
+        _t(
+            "Prompt refinement model: {model}",
+            model=project.prompt_refinement_model,
+        )
     )
     if not overview["available"]:
-        st.info(_t("Create and complete the initial review queue first."))
+        st.info(_t("Create and complete a manual review queue first."))
         return
     if overview["unreviewed"]:
         st.info(
             _t(
-                "Finish all {count} initial manual decisions before generating a prompt "
+                "Finish all {count} remaining manual decisions before generating a prompt "
                 "proposal.",
                 count=overview["unreviewed"],
             )
@@ -1646,15 +2042,11 @@ def _render_prompt_refinement(
 
     refinement = overview.get("refinement", {})
     status = str(refinement.get("status") or "not_generated")
-    has_api_key = store.has_api_key(project.slug) or bool(
-        os.environ.get("OPENAI_API_KEY")
-    )
+    has_api_key = store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
     if status == "proposed":
         try:
             proposal = service.load_prompt_refinement_proposal(project.slug)
-            baseline_prompt = Path(proposal["baseline_prompt_path"]).read_text(
-                encoding="utf-8"
-            )
+            baseline_prompt = Path(proposal["baseline_prompt_path"]).read_text(encoding="utf-8")
         except (OSError, RuntimeError, ValueError) as exc:
             st.error(_runtime_text(str(exc)))
             return
@@ -1684,6 +2076,15 @@ def _render_prompt_refinement(
                 total=proposal.get("rows_total", 0),
             )
         )
+        feedback_csv = refinement.get("feedback_csv_path")
+        if feedback_csv and Path(feedback_csv).exists():
+            st.download_button(
+                _t("Download prompt feedback CSV"),
+                data=Path(feedback_csv).read_bytes(),
+                file_name=Path(feedback_csv).name,
+                mime="text/csv",
+                icon=":material/download:",
+            )
         prompt_columns = st.columns(2)
         with prompt_columns[0]:
             st.text_area(
@@ -1727,30 +2128,40 @@ def _render_prompt_refinement(
         return
 
     if status == "approved":
-        st.success(
-            _t(
-                "The revised prompt is approved. Initial AI exclusions can be replayed "
-                "during snowballing."
+        replay_status = str(refinement.get("replay_status") or "not_available")
+        if replay_status == "completed":
+            st.success(
+                _t(
+                    "The revised prompt is active. Historical AI exclusions were already "
+                    "replayed once; later prompt updates apply only to newly discovered papers."
+                )
             )
-        )
+        else:
+            st.success(
+                _t(
+                    "The revised prompt is active. The one-time historical replay can be "
+                    "started during snowballing."
+                )
+            )
         st.caption(
             _t(
                 "Replay status: {status}",
-                status=_state_label(str(refinement.get("replay_status") or "pending")),
+                status=_state_label(replay_status),
             )
         )
         approved_value = refinement.get("approved_prompt_path")
         if approved_value and Path(approved_value).exists():
             with st.expander(_t("View approved prompt")):
                 st.code(Path(approved_value).read_text(encoding="utf-8"), language="text")
-        return
 
     if status == "rejected":
         st.info(_t("The previous prompt proposal was rejected."))
     if not has_api_key:
         st.warning(_t("Add an API key on the AI settings page before continuing."))
     if st.button(
-        _t("Generate prompt proposal"),
+        _t("Generate updated prompt proposal")
+        if status == "approved"
+        else _t("Generate prompt proposal"),
         type="primary",
         icon=":material/auto_awesome:",
         disabled=not has_api_key or bool(task and task.running),
@@ -1779,38 +2190,183 @@ def _render_prompt_change_list(container, title: str, values: object) -> None:
 
 
 def _render_snowball(service: PipelineService, project: ProjectSettings) -> None:
-    st.title(_t("Snowball"))
-    st.write(
-        _t(
-            "Included and related papers become seeds. Each round collects references and "
-            "citations, deduplicates them against every audited paper, and creates a new review "
-            "queue."
-        )
-    )
     state = service.current_state_or_none(project.slug)
     if not state:
         st.info(_t("Complete the initial discovery and review first."))
         return
-    _render_round_overview(state)
+    st.subheader(_t("Current snowball state"))
+    latest_state_round = state["rounds"][-1]
+    state_metrics = st.columns(3)
+    state_metrics[0].metric(_t("Round"), latest_state_round.get("index", 0))
+    state_metrics[1].metric(
+        _t("Status"), _state_label(str(latest_state_round.get("status") or "unknown"))
+    )
+    state_metrics[2].metric(
+        _t("Review queue"), latest_state_round.get("counts", {}).get("audit_queue", 0)
+    )
+    with st.expander(_t("Show round history")):
+        _render_round_overview(state)
+    _render_run_log_download(
+        service,
+        project.slug,
+        key=f"snowball_run_log_{state['run_id']}",
+    )
+    latest_snowball = next(
+        (item for item in reversed(state.get("rounds", [])) if item.get("kind") == "snowball"),
+        None,
+    )
+    if latest_snowball:
+        provider_successes = latest_snowball.get("counts", {}).get(
+            "provider_successes",
+            {},
+        )
+        provider_failures = latest_snowball.get("counts", {}).get(
+            "provider_failures",
+            {},
+        )
+        providers = latest_snowball.get("counts", {}).get(
+            "citation_providers",
+            [],
+        )
+        if isinstance(providers, list) and providers:
+            activity = "; ".join(
+                _t(
+                    "{provider}: {successes} successful calls, {failures} failures",
+                    provider=SNOWBALL_PROVIDER_LABELS.get(provider, provider),
+                    successes=(
+                        provider_successes.get(provider, 0)
+                        if isinstance(provider_successes, dict)
+                        else 0
+                    ),
+                    failures=(
+                        provider_failures.get(provider, 0)
+                        if isinstance(provider_failures, dict)
+                        else 0
+                    ),
+                )
+                for provider in providers
+            )
+            st.caption(_t("Provider activity: {details}", details=activity))
+            if isinstance(provider_failures, dict) and sum(
+                int(value or 0) for value in provider_failures.values()
+            ):
+                st.warning(
+                    _t(
+                        "Some citation-provider requests failed. The successful results remain "
+                        "valid, affected seed papers are marked, and this round can continue "
+                        "to screening and manual review."
+                    )
+                )
+        coverage_path_value = latest_snowball.get("files", {}).get("seed_coverage")
+        if coverage_path_value and Path(coverage_path_value).exists():
+            coverage_frame = pd.read_csv(coverage_path_value, keep_default_na=False)
+            issue_frame = (
+                coverage_frame[coverage_frame["coverage_status"] != "complete"]
+                if "coverage_status" in coverage_frame
+                else coverage_frame.iloc[0:0]
+            )
+            if not issue_frame.empty:
+                with st.expander(
+                    _t(
+                        "Citation coverage warnings ({count} seed papers)",
+                        count=len(issue_frame),
+                    ),
+                    expanded=True,
+                ):
+                    display_columns = [
+                        column
+                        for column in [
+                            "seed_title",
+                            "coverage_status",
+                            "missing_providers",
+                            "provider_errors",
+                            "references_fetched",
+                            "citations_fetched",
+                        ]
+                        if column in issue_frame.columns
+                    ]
+                    st.dataframe(
+                        issue_frame[display_columns],
+                        hide_index=True,
+                        width="stretch",
+                    )
+                    st.download_button(
+                        _t("Download seed coverage report"),
+                        data=Path(coverage_path_value).read_bytes(),
+                        file_name=Path(coverage_path_value).name,
+                        mime="text/csv",
+                        icon=":material/download:",
+                    )
     task = _task_manager().snapshot(project.slug)
-    if task and task.running:
+    if task and task.running and task.operation in {
+        "snowball_discovery",
+        "targeted_snowball_discovery",
+        "review_preparation",
+    }:
         _render_current_run_progress(
             project.slug,
             service,
             widget_scope="snowball",
         )
-        st.info(_t("This run continues in the background. You can safely visit another page."))
         return
     latest = state["rounds"][-1]
     if latest.get("status") == "converged":
         st.success(
-            _t("Snowballing has converged because no new papers entered the review queue.")
+            _t(
+                "The incremental snowball has converged because no new papers entered the "
+                "review queue. You can still run a single known paper below."
+            )
         )
+    failed_snowball = bool(
+        latest.get("kind") == "snowball" and latest.get("status") in {"failed", "cancelled"}
+    )
+    retry_snowball = failed_snowball
+    if failed_snowball:
+        st.error(
+            _t(
+                "Snowball round {round_index} failed: {error}",
+                round_index=latest.get("index", ""),
+                error=_runtime_text(str(latest.get("error") or "Unknown error")),
+            )
+        )
+        st.caption(
+            _t(
+                "Successful citation-provider responses are cached. Retrying reuses them "
+                "and keeps the same snowball round."
+            )
+        )
+        if "OpenAlex" in str(latest.get("error") or ""):
+            st.link_button(
+                _t("OpenAlex usage dashboard"),
+                "https://openalex.org/settings/usage",
+                icon=":material/open_in_new:",
+            )
+    if (
+        latest.get("kind") == "snowball"
+        and latest.get("status") in {"discovery_complete", "citation_incomplete"}
+        and latest.get("files", {}).get("enriched")
+        and not latest.get("files", {}).get("audit")
+    ):
+        st.info(
+            _t(
+                "Snowball discovery is complete. Create its review queue before starting "
+                "another round."
+            )
+        )
+        _review_preparation_panel(service.store, service, project, latest)
         return
-    if not latest.get("files", {}).get("audit"):
+    review_round = next(
+        (
+            item
+            for item in reversed(state["rounds"])
+            if item.get("files", {}).get("audit") and not (retry_snowball and item is latest)
+        ),
+        None,
+    )
+    if review_round is None:
         st.info(_t("Prepare the current round in the Run center before continuing."))
         return
-    _, _, summary = load_audit(Path(latest["files"]["audit"]))
+    _, _, summary = load_audit(Path(review_round["files"]["audit"]))
     if summary.unreviewed:
         st.warning(
             _t(
@@ -1818,16 +2374,209 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
                 count=summary.unreviewed,
             )
         )
+    st.divider()
+    st.subheader(_t("Next citation run"))
+    with st.expander(_t("Citation and screening settings"), expanded=True):
+        run_options = _render_snowball_run_settings(service, project, state)
+    provider_selection_valid = run_options["provider_selection_valid"]
+    has_api_key = run_options["has_api_key"]
+    replay_overview = service.prompt_replay_overview(project.slug)
+    replay_initial_exclusions = False
+    if replay_overview["replay_status"] == "completed":
+        st.success(
+            _t(
+                "Initial AI exclusions were replayed once in snowball round {round_index}. "
+                "Later prompt updates will not re-run them.",
+                round_index=replay_overview.get("replay_round", ""),
+            )
+        )
+    elif replay_overview["approved"] and replay_overview["eligible"]:
+        replay_initial_exclusions = st.toggle(
+            _t("Re-screen initial AI exclusions with the approved prompt"),
+            value=True,
+            disabled=not has_api_key,
+            key=f"snowball_prompt_replay_{state['run_id']}",
+            help=_t(
+                "Papers recovered as include, maybe, or failed enter the next manual review. "
+                "Papers excluded again remain outside the review queue."
+            ),
+        )
+        st.caption(
+            _t(
+                "Replay pool: {source} initial AI exclusions - {reviewed} human-reviewed "
+                "papers = {eligible} papers sent to AI.",
+                source=replay_overview["source_exclusions"],
+                reviewed=replay_overview["reviewed_removed"],
+                eligible=replay_overview["eligible"],
+            )
+        )
+    elif replay_overview["eligible"]:
+        st.info(
+            _t(
+                "Approve a refined prompt in Manual Review to re-screen "
+                "{count} initial AI exclusions.",
+                count=replay_overview["eligible"],
+            )
+        )
+    standard_tab, targeted_tab, prompt_tab = st.tabs(
+        [
+            _t("Latest reviewed seeds"),
+            _t("Single-paper snowball"),
+            _t("Update AI prompt"),
+        ]
+    )
+    common_disabled = (
+        not provider_selection_valid
+        or summary.unreviewed > 0
+        or (replay_initial_exclusions and not has_api_key)
+    )
+    with standard_tab:
+        st.write(
+            _t(
+                "Expand only the newly included or related papers from the latest completed "
+                "manual review round."
+            )
+        )
+        standard_disabled = common_disabled or (
+            latest.get("status") == "converged" and not failed_snowball
+        )
+        if st.button(
+            _t("Retry failed snowball round")
+            if failed_snowball
+            else _t("Start next snowball round"),
+            type="primary",
+            disabled=standard_disabled,
+            icon=":material/account_tree:",
+            key=f"start_incremental_snowball_{state['run_id']}",
+        ):
+            _start_snowball_task(
+                service,
+                project,
+                run_options,
+                replay_initial_exclusions=replay_initial_exclusions,
+            )
+        if latest.get("status") == "converged" and not failed_snowball:
+            st.caption(
+                _t(
+                    "No unused seeds remain in the latest round. Use the single-paper tab "
+                    "for a targeted recovery run."
+                )
+            )
+    with targeted_tab:
+        _render_single_paper_snowball(
+            service,
+            project,
+            state,
+            run_options,
+            replay_initial_exclusions=replay_initial_exclusions,
+            disabled=common_disabled or failed_snowball,
+        )
+        if failed_snowball:
+            st.warning(_t("Retry or finish the failed round before starting a new target."))
+    with prompt_tab:
+        _render_prompt_refinement(
+            service.store,
+            service,
+            project,
+            embedded=True,
+        )
+
+
+def _render_snowball_run_settings(
+    service: PipelineService,
+    project: ProjectSettings,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    st.markdown(f"**{_t('Citation providers')}**")
+    st.caption(
+        _t(
+            "Providers are tried from left to right for each seed paper. A failed request is "
+            "recorded on that seed, while later seed papers are still attempted."
+        )
+    )
+    configured_snowball = load_config(service.store.config_path(project.slug)).snowballing
+    saved_providers = state.get("options", {}).get(
+        "snowball_citation_providers",
+        configured_snowball.providers,
+    )
+    if not isinstance(saved_providers, list):
+        saved_providers = configured_snowball.providers
+    saved_slots = [
+        *[provider for provider in saved_providers if provider in SNOWBALL_PROVIDER_OPTIONS][:3],
+        "__disabled__",
+        "__disabled__",
+        "__disabled__",
+    ][:3]
+    provider_choices = ["__disabled__", *SNOWBALL_PROVIDER_OPTIONS]
+    provider_columns = st.columns(3)
+    selected_slots: list[str] = []
+    for index, label in enumerate(
+        [_t("Primary provider"), _t("Secondary provider"), _t("Tertiary provider")]
+    ):
+        current = saved_slots[index]
+        with provider_columns[index]:
+            selected_slots.append(
+                st.selectbox(
+                    label,
+                    provider_choices,
+                    index=provider_choices.index(current),
+                    format_func=lambda value: _t(SNOWBALL_PROVIDER_LABELS[value]),
+                    key=f"snowball_provider_{index}_{state['run_id']}",
+                )
+            )
+    selected_providers = [provider for provider in selected_slots if provider != "__disabled__"]
+    provider_selection_valid = bool(selected_providers) and len(selected_providers) == len(
+        set(selected_providers)
+    )
+    if not selected_providers:
+        st.error(_t("Select at least one citation provider."))
+    elif len(selected_providers) != len(set(selected_providers)):
+        st.error(_t("Each citation provider can appear only once."))
+
+    saved_strategy = str(
+        state.get("options", {}).get(
+            "snowball_provider_strategy",
+            configured_snowball.provider_strategy,
+        )
+    )
+    if saved_strategy not in {"merge", "failover"}:
+        saved_strategy = "merge"
+    provider_strategy = st.radio(
+        _t("Provider mode"),
+        ["merge", "failover"],
+        index=["merge", "failover"].index(saved_strategy),
+        format_func=lambda value: _t("Merge coverage" if value == "merge" else "Failover only"),
+        horizontal=True,
+        key=f"snowball_provider_strategy_{state['run_id']}",
+        help=_t(
+            "Merge coverage queries every selected provider and unions the results. "
+            "Failover only stops after the first successful provider."
+        ),
+    )
+    if (
+        "semantic_scholar" in selected_providers
+        and not service.store.read_semantic_scholar_api_key(project.slug)
+        and not os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+    ):
+        st.info(
+            _t(
+                "Semantic Scholar works without a key, but a personal key gives a more "
+                "predictable rate limit."
+            )
+        )
+    if (
+        "openalex" in selected_providers
+        and not service.store.read_openalex_api_key(project.slug)
+        and not os.environ.get("OPENALEX_API_KEY")
+    ):
+        st.warning(_t("OpenAlex is selected but no OpenAlex API key is available."))
+
+    st.markdown(f"**{_t('Collection limits')}**")
     complete_citations = st.toggle(
         _t("Retrieve all references and citing papers"),
-        value=bool(
-            state.get("options", {}).get("snowball_complete_citations", True)
-        ),
+        value=bool(state.get("options", {}).get("snowball_complete_citations", True)),
         key=f"snowball_complete_citations_{state['run_id']}",
-        help=_t(
-            "Recommended for systematic reviews. Disable only to set per-seed "
-            "safety limits."
-        ),
+        help=_t("Recommended for systematic reviews. Disable only to set per-seed safety limits."),
     )
     columns = st.columns(3)
     with columns[0]:
@@ -1836,12 +2585,7 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             min_value=1,
             max_value=100_000,
             value=max(
-                int(
-                    state.get("options", {}).get(
-                        "snowball_backward_limit",
-                        500,
-                    )
-                ),
+                int(state.get("options", {}).get("snowball_backward_limit", 500)),
                 1,
             ),
             disabled=complete_citations,
@@ -1853,12 +2597,7 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             min_value=1,
             max_value=100_000,
             value=max(
-                int(
-                    state.get("options", {}).get(
-                        "snowball_forward_limit",
-                        500,
-                    )
-                ),
+                int(state.get("options", {}).get("snowball_forward_limit", 500)),
                 1,
             ),
             disabled=complete_citations,
@@ -1868,18 +2607,18 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
         abstract_limit = st.number_input(
             _t("Abstract limit"),
             min_value=0,
-            value=0,
+            value=int(state.get("options", {}).get("snowball_enrich_limit") or 0),
             help=_t("Use 0 for all new candidates."),
             key=f"snowball_abstract_limit_{state['run_id']}",
         )
     core_online = st.checkbox(
         _t("Look up CORE ranks online"),
-        value=True,
+        value=bool(state.get("options", {}).get("snowball_core_online", True)),
         key=f"snowball_core_online_{state['run_id']}",
     )
-    has_api_key = service.store.has_api_key(project.slug) or bool(
-        os.environ.get("OPENAI_API_KEY")
-    )
+
+    st.markdown(f"**{_t('AI title screening')}**")
+    has_api_key = service.store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
     title_default = bool(state.get("options", {}).get("title_llm_enabled", has_api_key))
     title_columns = st.columns([2, 1])
     with title_columns[0]:
@@ -1899,73 +2638,169 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             disabled=not use_title_llm,
             key=f"snowball_title_batch_{state['run_id']}",
         )
-    replay_overview = service.prompt_replay_overview(project.slug)
-    replay_initial_exclusions = False
-    if replay_overview["replay_status"] == "completed":
-        st.success(
-            _t(
-                "Initial AI exclusions were replayed in snowball round {round_index}.",
-                round_index=replay_overview.get("replay_round", ""),
+    return {
+        "selected_providers": selected_providers,
+        "provider_selection_valid": provider_selection_valid,
+        "provider_strategy": provider_strategy,
+        "complete_citations": complete_citations,
+        "backward": int(backward),
+        "forward": int(forward),
+        "abstract_limit": int(abstract_limit),
+        "core_online": bool(core_online),
+        "has_api_key": has_api_key,
+        "use_title_llm": bool(use_title_llm),
+        "title_batch_size": int(title_batch_size),
+    }
+
+
+def _start_snowball_task(
+    service: PipelineService,
+    project: ProjectSettings,
+    run_options: dict[str, Any],
+    *,
+    replay_initial_exclusions: bool,
+    target_seed: dict[str, Any] | None = None,
+) -> None:
+    started = _task_manager().start(
+        project.slug,
+        "targeted_snowball_discovery" if target_seed else "snowball_discovery",
+        service.start_snowball_discovery,
+        project.slug,
+        citation_providers=run_options["selected_providers"],
+        provider_strategy=run_options["provider_strategy"],
+        max_backward_per_seed=(0 if run_options["complete_citations"] else run_options["backward"]),
+        max_forward_per_seed=(0 if run_options["complete_citations"] else run_options["forward"]),
+        enrich_limit=_none_if_zero(run_options["abstract_limit"]),
+        core_online=run_options["core_online"],
+        use_title_llm=run_options["use_title_llm"],
+        title_batch_size=run_options["title_batch_size"],
+        replay_initial_exclusions=replay_initial_exclusions,
+        target_seed=target_seed,
+    )
+    if started:
+        st.rerun()
+    else:
+        st.warning(_t("A pipeline task is already running for this project."))
+
+
+def _render_single_paper_snowball(
+    service: PipelineService,
+    project: ProjectSettings,
+    state: dict[str, Any],
+    run_options: dict[str, Any],
+    *,
+    replay_initial_exclusions: bool,
+    disabled: bool,
+) -> None:
+    st.write(
+        _t(
+            "Resolve one known paper by title and collect only its references and citing "
+            "papers. Existing audit decisions are removed before downstream screening."
+        )
+    )
+    run_id = str(state["run_id"])
+    title = st.text_input(
+        _t("Paper title"),
+        placeholder=_t("Enter the full or approximate title"),
+        key=f"targeted_snowball_title_{run_id}",
+    )
+    catalog = _source_catalog()
+    available_sources = catalog.available_source_ids()
+    default_sources = [
+        source for source in project.discovery_sources if source in available_sources
+    ]
+    lookup_sources = st.multiselect(
+        _t("Metadata search sources"),
+        available_sources,
+        default=default_sources or available_sources[:1],
+        format_func=lambda source_id: catalog.sources[source_id].label,
+        key=f"targeted_snowball_sources_{run_id}",
+    )
+    matches_key = f"targeted_snowball_matches_{run_id}"
+    query_key = f"targeted_snowball_query_{run_id}"
+    errors_key = f"targeted_snowball_errors_{run_id}"
+    if st.button(
+        _t("Find paper"),
+        icon=":material/search:",
+        disabled=disabled or not title.strip() or not lookup_sources,
+        key=f"targeted_snowball_find_{run_id}",
+    ):
+        with st.spinner(_t("Searching selected sources...")):
+            matches, errors = search_title_candidates(
+                title,
+                lookup_sources,
+                load_config(service.store.config_path(project.slug)),
+                limit_per_source=5,
             )
-        )
-    elif replay_overview["approved"] and replay_overview["eligible"]:
-        replay_initial_exclusions = st.toggle(
-            _t("Re-screen initial AI exclusions with the approved prompt"),
-            value=True,
-            disabled=not has_api_key,
-            key=f"snowball_prompt_replay_{state['run_id']}",
-            help=_t(
-                "Papers recovered as include, maybe, or failed enter the next manual review. "
-                "Papers excluded again remain outside the review queue."
-            ),
-        )
-        st.caption(
-            _t(
-                "{count} initial AI exclusions have never received a human decision.",
-                count=replay_overview["eligible"],
+        st.session_state[matches_key] = [record.to_dict(include_raw=True) for record in matches]
+        st.session_state[query_key] = title.strip()
+        st.session_state[errors_key] = errors
+
+    current_query_matches = st.session_state.get(query_key) == title.strip()
+    matches = (
+        [PaperRecord.from_dict(value) for value in st.session_state.get(matches_key, [])]
+        if current_query_matches
+        else []
+    )
+    if current_query_matches:
+        for source_id, error in st.session_state.get(errors_key, {}).items():
+            source = catalog.sources.get(source_id)
+            st.warning(
+                _t(
+                    "{source} could not be searched: {error}",
+                    source=source.label if source else source_id,
+                    error=error,
+                )
             )
+
+    target_seed: dict[str, Any] = {"title": title.strip()}
+    if matches:
+        match_index = st.selectbox(
+            _t("Resolved paper"),
+            range(len(matches)),
+            format_func=lambda index: _manual_match_label(matches[index]),
+            key=f"targeted_snowball_match_{run_id}",
         )
-    elif replay_overview["eligible"]:
+        selected = matches[match_index]
+        target_seed = selected.to_row()
+        st.caption(_paper_metadata(target_seed))
+    elif current_query_matches:
         st.info(
             _t(
-                "Approve a refined prompt in the initial Manual Review to re-screen "
-                "{count} initial AI exclusions.",
-                count=replay_overview["eligible"],
+                "No metadata match was found. The citation providers can still resolve the "
+                "exact title when the run starts."
             )
         )
-    if st.button(
-        _t("Start next snowball round"),
-        type="primary",
-        disabled=summary.unreviewed > 0
-        or (replay_initial_exclusions and not has_api_key),
-        icon=":material/account_tree:",
-    ):
-        started = _task_manager().start(
-            project.slug,
-            "snowball_discovery",
-            service.start_snowball_discovery,
-            project.slug,
-            max_backward_per_seed=0 if complete_citations else int(backward),
-            max_forward_per_seed=0 if complete_citations else int(forward),
-            enrich_limit=_none_if_zero(abstract_limit),
-            core_online=core_online,
-            use_title_llm=use_title_llm,
-            title_batch_size=int(title_batch_size),
-            replay_initial_exclusions=replay_initial_exclusions,
+
+    st.caption(
+        _t(
+            "If this paper was already reviewed, it will remain excluded from the new review "
+            "queue; only previously unseen neighboring papers continue."
         )
-        if started:
-            st.rerun()
-        else:
-            st.warning(_t("A pipeline task is already running for this project."))
+    )
+    if st.button(
+        _t("Start single-paper snowball"),
+        type="primary",
+        icon=":material/manage_search:",
+        disabled=disabled or not title.strip(),
+        key=f"targeted_snowball_start_{run_id}",
+    ):
+        _start_snowball_task(
+            service,
+            project,
+            run_options,
+            replay_initial_exclusions=replay_initial_exclusions,
+            target_seed=target_seed,
+        )
 
 
 def _render_results(service: PipelineService, project: ProjectSettings) -> None:
-    st.title(_t("Results"))
     state = service.current_state_or_none(project.slug)
     if not state:
         st.info(_t("No run is available yet."))
         return
-    _render_round_overview(state)
+    with st.expander(_t("Show round history")):
+        _render_round_overview(state)
     audit_rounds = [item for item in state["rounds"] if item.get("files", {}).get("audit")]
     if not audit_rounds:
         st.info(_t("Complete at least one manual review round before exporting results."))
@@ -1986,6 +2821,22 @@ def _render_results(service: PipelineService, project: ProjectSettings) -> None:
     report_path = Path(exports["report"])
     included = pd.read_csv(included_path, keep_default_na=False)
     audited = pd.read_csv(audit_path, keep_default_na=False)
+    summary_tab, papers_tab, downloads_tab = st.tabs(
+        [_t("Summary"), _t("Included papers"), _t("Downloads")]
+    )
+    with summary_tab:
+        _render_results_summary(audit_rounds, included, audited)
+    with papers_tab:
+        _render_included_papers(included)
+    with downloads_tab:
+        _render_result_downloads(included_path, audit_path, report_path)
+
+
+def _render_results_summary(
+    audit_rounds: list[dict[str, Any]],
+    included: pd.DataFrame,
+    audited: pd.DataFrame,
+) -> None:
     metric_columns = st.columns(4)
     metric_columns[0].metric(_t("Audit rounds"), len(audit_rounds))
     metric_columns[1].metric(_t("Audited papers"), len(audited))
@@ -2003,6 +2854,9 @@ def _render_results(service: PipelineService, project: ProjectSettings) -> None:
         if not included.empty and "venue_type" in included:
             venue_counts = included["venue_type"].replace("", "unknown").map(_value_label)
             st.bar_chart(venue_counts.value_counts())
+
+
+def _render_included_papers(included: pd.DataFrame) -> None:
     display_columns = [
         column
         for column in [
@@ -2029,6 +2883,13 @@ def _render_results(service: PipelineService, project: ProjectSettings) -> None:
         height=420,
         column_config=_result_column_config(),
     )
+
+
+def _render_result_downloads(
+    included_path: Path,
+    audit_path: Path,
+    report_path: Path,
+) -> None:
     download_columns = st.columns(3)
     with download_columns[0]:
         st.download_button(
@@ -2061,13 +2922,6 @@ def _render_ai_research(
     service: PipelineService,
     project: ProjectSettings,
 ) -> None:
-    st.title(_t("AI research"))
-    st.write(
-        _t(
-            "Study individual papers with their PDFs or classify the final reviewed corpus. "
-            "AI output remains an analytical aid and should be checked by the researcher."
-        )
-    )
     state = service.current_state_or_none(project.slug)
     if not state or not state.get("exports", {}).get("included"):
         st.info(_t("Generate final exports on the Results page before using AI research."))
@@ -2235,10 +3089,15 @@ def _render_corpus_analysis(
         estimate_corpus_requests(len(included)),
     )
     task = _task_manager().snapshot(project.slug)
-    progress_state = (service.current_state_or_none(project.slug) or state).get(
-        "progress", {}
+    progress_state = (service.current_state_or_none(project.slug) or state).get("progress", {})
+    corpus_task_running = bool(
+        task and task.running and task.operation == "corpus_analysis"
     )
-    if (task and task.running) or progress_state.get("operation") == "Corpus analysis":
+    corpus_progress_visible = bool(
+        progress_state.get("operation") == "Corpus analysis"
+        and progress_state.get("status") in {"running", "failed", "cancelled"}
+    )
+    if corpus_task_running or corpus_progress_visible:
         _render_current_run_progress(
             project.slug,
             service,
@@ -2293,9 +3152,7 @@ def _render_corpus_analysis(
         st.markdown(f"**{category.get('label', category_id)} ({count})**")
         st.write(category.get("description", ""))
     st.dataframe(
-        classifications[
-            ["title", "year", "venue", "primary_category", "rationale"]
-        ],
+        classifications[["title", "year", "venue", "primary_category", "rationale"]],
         hide_index=True,
         width="stretch",
         height=420,
@@ -2303,12 +3160,8 @@ def _render_corpus_analysis(
             "title": st.column_config.TextColumn(_t("Title"), width="large"),
             "year": st.column_config.TextColumn(_t("Year")),
             "venue": st.column_config.TextColumn(_t("Venue")),
-            "primary_category": st.column_config.TextColumn(
-                _t("Primary category")
-            ),
-            "rationale": st.column_config.TextColumn(
-                _t("Classification rationale"), width="large"
-            ),
+            "primary_category": st.column_config.TextColumn(_t("Primary category")),
+            "rationale": st.column_config.TextColumn(_t("Classification rationale"), width="large"),
         },
     )
     download_columns = st.columns(3)
@@ -2346,7 +3199,9 @@ def _render_round_overview(state: dict[str, Any]) -> None:
             {
                 _t("Round"): item.get("index"),
                 _t("Type"): _state_label(item.get("kind", "")),
+                _t("Mode"): _state_label(item.get("snowball_mode", "")),
                 _t("Status"): _state_label(item.get("status", "")),
+                _t("Target paper"): counts.get("target_seed_title", ""),
                 _t("Pool"): counts.get("pool_rows", counts.get("deduped_records", "")),
                 _t("Added"): counts.get("added_rows", ""),
                 _t("Manual added"): counts.get("manual_review_additions", ""),
@@ -2354,6 +3209,7 @@ def _render_round_overview(state: dict[str, Any]) -> None:
                 _t("Title kept"): counts.get("title_kept", ""),
                 _t("Title excluded"): counts.get("title_excluded", ""),
                 _t("Abstract lookups"): counts.get("abstracts_attempted", ""),
+                _t("Coverage warnings"): counts.get("coverage_issue_seeds", ""),
                 _t("Review queue"): counts.get("audit_queue", ""),
                 _t("Reviewed"): counts.get("reviewed", ""),
             }
@@ -2363,8 +3219,7 @@ def _render_round_overview(state: dict[str, Any]) -> None:
 
 def _render_literature_flow(state: dict[str, Any]) -> None:
     rounds = [
-        (round_state, round_flow_stages(round_state))
-        for round_state in state.get("rounds", [])
+        (round_state, round_flow_stages(round_state)) for round_state in state.get("rounds", [])
     ]
     rounds = [(round_state, stages) for round_state, stages in rounds if stages]
     if not rounds:
@@ -2381,8 +3236,7 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
         round_index = int(round_state.get("index", 0))
         if len(rounds) > 1:
             st.markdown(
-                f"**{_t('Round')} {round_index}: "
-                f"{_state_label(round_state.get('kind', ''))}**"
+                f"**{_t('Round')} {round_index}: {_state_label(round_state.get('kind', ''))}**"
             )
         nodes: list[str] = []
         for index, stage in enumerate(stages):
@@ -2413,11 +3267,7 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
             loop_to = str(stage.get("loop_to") or "")
             if loop_to:
                 target = next(
-                    (
-                        candidate
-                        for candidate in stages
-                        if candidate.get("key") == loop_to
-                    ),
+                    (candidate for candidate in stages if candidate.get("key") == loop_to),
                     {},
                 )
                 nodes.append(
@@ -2434,18 +3284,6 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
                 nodes.append('<div class="survey-flow-arrow" aria-hidden="true">&#8594;</div>')
         st.markdown(f'<div class="survey-flow">{"".join(nodes)}</div>', unsafe_allow_html=True)
 
-    abstract_api_requests = sum(
-        int(round_state.get("counts", {}).get("abstract_api_requests") or 0)
-        for round_state, _ in rounds
-    )
-    abstract_cache_hits = sum(
-        int(round_state.get("counts", {}).get("abstract_cache_hits") or 0)
-        for round_state, _ in rounds
-    )
-    abstract_batch_requests = sum(
-        int(round_state.get("counts", {}).get("abstract_batch_requests") or 0)
-        for round_state, _ in rounds
-    )
     rate_limit_retries = sum(
         int(round_state.get("counts", {}).get("abstract_rate_limit_retries") or 0)
         for round_state, _ in rounds
@@ -2454,20 +3292,15 @@ def _render_literature_flow(state: dict[str, Any]) -> None:
         float(round_state.get("counts", {}).get("abstract_rate_limit_wait_seconds") or 0)
         for round_state, _ in rounds
     )
-    if abstract_api_requests or abstract_cache_hits:
-        diagnostic = _t(
-            "Abstract enrichment: {requests} API requests, {batches} batch requests, "
-            "{cache_hits} cache hits, {retries} rate-limit retries, {wait} seconds waiting.",
-            requests=f"{abstract_api_requests:,}",
-            batches=f"{abstract_batch_requests:,}",
-            cache_hits=f"{abstract_cache_hits:,}",
-            retries=f"{rate_limit_retries:,}",
-            wait=f"{rate_limit_wait:.1f}",
+    if rate_limit_retries:
+        st.warning(
+            _t(
+                "Abstract enrichment was rate-limited: {retries} retries and {wait} seconds "
+                "waiting. Completed results were preserved.",
+                retries=f"{rate_limit_retries:,}",
+                wait=f"{rate_limit_wait:.1f}",
+            )
         )
-        if rate_limit_retries:
-            st.warning(diagnostic)
-        else:
-            st.caption(diagnostic + " " + _t("No HTTP 429 throttling was observed."))
 
     download_columns = st.columns(2)
     with download_columns[0]:
@@ -2510,46 +3343,48 @@ def _render_domain_source_selector(
         )
 
     st.subheader(_t("Research field and sources"))
-    domain_id = st.selectbox(
-        _t("Research field"),
-        list(catalog.profiles),
-        format_func=lambda profile_id: catalog.profiles[profile_id].localized_label(language),
-        key=domain_key,
-        on_change=_reset_sources_for_domain,
-        args=(domain_key, sources_key),
-    )
+    selector_columns = st.columns([1, 2])
+    with selector_columns[0]:
+        domain_id = st.selectbox(
+            _t("Research field"),
+            list(catalog.profiles),
+            format_func=lambda profile_id: catalog.profiles[profile_id].localized_label(language),
+            key=domain_key,
+            on_change=_reset_sources_for_domain,
+            args=(domain_key, sources_key),
+        )
     profile = catalog.profiles[domain_id]
-    st.caption(profile.localized_description(language))
     available_sources = catalog.available_source_ids()
     recommended = set(catalog.recommended_sources(domain_id))
-    selected_sources = st.multiselect(
-        _t("Literature sources"),
-        available_sources,
-        format_func=lambda source_id: _source_option_label(
-            catalog,
-            source_id,
-            source_id in recommended,
-        ),
-        key=sources_key,
-        help=_t("Recommended sources are selected automatically; you can override them."),
-    )
+    with selector_columns[0]:
+        st.caption(profile.localized_description(language))
+    with selector_columns[1]:
+        selected_sources = st.multiselect(
+            _t("Literature sources"),
+            available_sources,
+            format_func=lambda source_id: _source_option_label(
+                catalog,
+                source_id,
+                source_id in recommended,
+            ),
+            key=sources_key,
+            help=_t("Recommended sources are selected automatically; you can override them."),
+        )
     visible_source_ids = list(
-        dict.fromkeys(
-            [*selected_sources, *profile.recommended_sources, *profile.optional_sources]
-        )
+        dict.fromkeys([*selected_sources, *profile.recommended_sources, *profile.optional_sources])
     )
-    st.markdown(f"**{_t('Coverage')}**")
-    for source_id in visible_source_ids:
-        source = catalog.sources[source_id]
-        role = (
-            _t("Recommended")
-            if source_id in profile.recommended_sources
-            else _t("Optional")
-        )
-        availability = _t("Available") if source.available else _t("Planned")
-        st.markdown(f"**{source.label}** · {role} · {availability}")
-        st.write(source.localized_scope(language))
-        st.caption(f"{_t('Limitations')}: {source.localized_limitation(language)}")
+    with st.expander(_t("Coverage")):
+        for source_id in visible_source_ids:
+            source = catalog.sources[source_id]
+            role = (
+                _t("Recommended")
+                if source_id in profile.recommended_sources
+                else _t("Optional")
+            )
+            availability = _t("Available") if source.available else _t("Planned")
+            st.markdown(f"**{source.label}** · {role} · {availability}")
+            st.write(source.localized_scope(language))
+            st.caption(f"{_t('Limitations')}: {source.localized_limitation(language)}")
     if not selected_sources:
         st.warning(_t("Select at least one available literature source."))
     return domain_id, selected_sources
@@ -2641,9 +3476,7 @@ def _render_model_selector(
         label,
         choices,
         index=choices.index(current) if current in choices else 0,
-        format_func=lambda value: _t("Custom model...")
-        if value == CUSTOM_MODEL_OPTION
-        else value,
+        format_func=lambda value: _t("Custom model...") if value == CUSTOM_MODEL_OPTION else value,
         key=key,
         help=help_text,
     )
@@ -2682,6 +3515,23 @@ def _t(message: str, **values: object) -> str:
 
 @st.fragment(run_every=1.0)
 def _render_current_run_progress(
+    project_slug: str,
+    service: PipelineService,
+    *,
+    widget_scope: str,
+) -> None:
+    with st.container(
+        border=True,
+        key=f"current_run_panel_{widget_scope}_{project_slug}",
+    ):
+        _render_current_run_progress_content(
+            project_slug,
+            service,
+            widget_scope=widget_scope,
+        )
+
+
+def _render_current_run_progress_content(
     project_slug: str,
     service: PipelineService,
     *,
@@ -2745,10 +3595,7 @@ def _render_current_run_progress(
             stage=_runtime_text(stage),
         )
 
-    overall_text = (
-        f"{overall_text} · "
-        f"{_t('{count} papers collected', count=paper_count)}"
-    )
+    overall_text = f"{overall_text} · {_t('{count} papers collected', count=paper_count)}"
     st.progress(overall_fraction, text=overall_text)
     st.progress(
         item_fraction,
@@ -2766,6 +3613,11 @@ def _render_current_run_progress(
             updated_at=progress.get("updated_at", state.get("updated_at", "")),
         )
     )
+    _render_run_log_download(
+        service,
+        project_slug,
+        key=f"run_log_{widget_scope}_{project_slug}",
+    )
 
     if task and task.running:
         if task.cancel_requested:
@@ -2775,11 +3627,7 @@ def _render_current_run_progress(
                 disabled=True,
                 key=f"stop_run_{widget_scope}_{project_slug}",
             )
-            st.caption(
-                _t(
-                    "The current item will finish safely before the run stops."
-                )
-            )
+            st.caption(_t("The current item will finish safely before the run stops."))
         elif st.button(
             _t("Stop run"),
             icon=":material/stop_circle:",
@@ -2828,28 +3676,45 @@ def _render_current_run_progress(
             ):
                 st.rerun()
 
-    if task and task.running:
-        if not task.cancel_requested:
-            st.info(_t("Updating automatically. You can safely visit another page."))
-    elif progress_status == "running":
-        st.warning(
-            _t(
-                "This saved run is no longer active. It may have been interrupted when the "
-                "app stopped."
+    if not (task and task.running):
+        if progress_status == "running":
+            st.warning(
+                _t(
+                    "This saved run is no longer active. It may have been interrupted when the "
+                    "app stopped."
+                )
             )
-        )
-    elif progress_status == "failed":
-        st.error(_t("Pipeline failed: {error}", error=_runtime_text(message)))
-    elif progress_status == "cancelled":
-        st.warning(_t("Run stopped. Completed files have been retained."))
+        elif progress_status == "failed":
+            st.error(_t("Pipeline failed: {error}", error=_runtime_text(message)))
+        elif progress_status == "cancelled":
+            st.warning(_t("Run stopped. Completed files have been retained."))
 
-    marker_key = (
-        f"progress_status_{widget_scope}_{project_slug}_{state.get('run_id', '')}"
-    )
+    marker_key = f"progress_status_{widget_scope}_{project_slug}_{state.get('run_id', '')}"
     previous_status = st.session_state.get(marker_key)
     st.session_state[marker_key] = progress_status
     if previous_status == "running" and progress_status != "running":
         st.rerun()
+
+
+def _render_run_log_download(
+    service: PipelineService,
+    project_slug: str,
+    *,
+    key: str,
+) -> None:
+    try:
+        log_path = service.run_log_path(project_slug)
+    except (FileNotFoundError, OSError, ValueError):
+        return
+    st.download_button(
+        _t("Export run log"),
+        data=log_path.read_bytes(),
+        file_name=f"{log_path.parent.name}_run_log.json",
+        mime="application/json",
+        icon=":material/download:",
+        key=key,
+        width="content",
+    )
 
 
 def _current_paper_count(state: dict[str, Any]) -> int:
@@ -2868,7 +3733,13 @@ def _current_paper_count(state: dict[str, Any]) -> int:
 def _state_label(value: object) -> str:
     normalized = str(value or "unknown").replace("_", " ").lower()
     translated = _t(normalized)
-    return translated if translated != normalized else normalized.title()
+    if translated != normalized:
+        return translated
+    label = normalized[:1].upper() + normalized[1:]
+    return " ".join(
+        word.upper() if word.lower() in {"ai", "llm", "api"} else word
+        for word in label.split()
+    )
 
 
 def _decision_label(value: object) -> str:
@@ -2952,6 +3823,21 @@ def _none_if_zero(value: int | float) -> int | None:
     return None if int(value) == 0 else int(value)
 
 
+def _format_usd_estimate(value: float | None) -> str:
+    if value is None:
+        return _t("Not available")
+    if value < 0.01:
+        return f"${value:.4f}"
+    return f"${value:.2f}"
+
+
+def _citation_failure_count(round_state: dict[str, Any]) -> int:
+    values = round_state.get("counts", {}).get("provider_failures", {}) or {}
+    if not isinstance(values, dict):
+        return 0
+    return sum(max(int(value or 0), 0) for value in values.values())
+
+
 def _filter_audit_frame(frame: pd.DataFrame, search: str, decision: str) -> pd.DataFrame:
     filtered = frame.copy()
     if search.strip():
@@ -2986,13 +3872,15 @@ def _audit_rows_changed(
 ) -> bool:
     for position, update in enumerate(updates):
         original_row = original.iloc[position]
-        if str(original_row.get("manual_decision") or "").strip().lower() != str(
-            update.get("manual_decision") or ""
-        ).strip().lower():
+        if (
+            str(original_row.get("manual_decision") or "").strip().lower()
+            != str(update.get("manual_decision") or "").strip().lower()
+        ):
             return True
-        if str(original_row.get("manual_notes") or "").strip() != str(
-            update.get("manual_notes") or ""
-        ).strip():
+        if (
+            str(original_row.get("manual_notes") or "").strip()
+            != str(update.get("manual_notes") or "").strip()
+        ):
             return True
     return False
 
@@ -3037,54 +3925,301 @@ def _apply_styles() -> None:
     st.markdown(
         """
         <style>
-        .block-container {max-width: 1440px; padding-top: 2rem; padding-bottom: 3rem;}
-        [data-testid="stMetric"] {border: 1px solid #d8dee8; border-radius: 6px; padding: 14px;}
-        [data-testid="stMetricLabel"] p {font-size: 0.78rem !important; line-height: 1.15;}
-        [data-testid="stMetricValue"] {
-            font-size: 1.15rem !important;
+        :root {
+            --sf-bg: #fbfbfd;
+            --sf-surface: #ffffff;
+            --sf-subtle: #f5f5f7;
+            --sf-border: #d9d9de;
+            --sf-border-soft: #e8e8ed;
+            --sf-text: #1d1d1f;
+            --sf-muted: #6e6e73;
+            --sf-blue: #006edb;
+            --sf-blue-hover: #0062c4;
+            --sf-green: #16805f;
+            --sf-red: #c94b4b;
+            --sf-focus: rgba(0, 110, 219, 0.18);
+        }
+        html, body, [data-testid="stAppViewContainer"] {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+                sans-serif;
+        }
+        [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+            background: var(--sf-bg);
+            color: var(--sf-text);
+        }
+        [data-testid="stHeader"] {background: rgba(251, 251, 253, 0.88);}
+        .block-container {
+            max-width: 1240px;
+            padding: 2.75rem 2.75rem 5rem;
+        }
+        .sf-brand {padding: 0.25rem 0 1.35rem;}
+        .sf-brand-name {
+            color: var(--sf-text);
+            font-size: 1.24rem;
+            font-weight: 680;
             line-height: 1.2;
+        }
+        .sf-brand-caption {
+            color: var(--sf-muted);
+            font-size: 0.76rem;
+            line-height: 1.35;
+            margin-top: 0.28rem;
+        }
+        .sf-nav-label, .sf-page-context {
+            color: var(--sf-muted);
+            font-size: 0.69rem;
+            font-weight: 650;
+            line-height: 1.3;
+            text-transform: uppercase;
+        }
+        .sf-nav-label {margin: 0.2rem 0 0.45rem;}
+        .sf-page-context {
+            margin-bottom: 0.45rem;
+            overflow-wrap: anywhere;
+        }
+        .sf-page-description {
+            color: var(--sf-muted);
+            font-size: 0.98rem;
+            line-height: 1.55;
+            max-width: 760px;
+            margin: -0.45rem 0 2.15rem;
+        }
+        .sf-sidebar-status {
+            align-items: center;
+            color: var(--sf-muted);
+            display: flex;
+            font-size: 0.82rem;
+            font-weight: 570;
+            gap: 0.52rem;
+            line-height: 1.3;
+            padding: 0.22rem 0;
+        }
+        .sf-sidebar-status span {
+            background: #9a9aa0;
+            border-radius: 50%;
+            display: inline-block;
+            height: 7px;
+            width: 7px;
+        }
+        .sf-sidebar-status-active span {background: var(--sf-green);}
+        .sf-footer {
+            align-items: center;
+            border-top: 1px solid var(--sf-border-soft);
+            color: var(--sf-muted);
+            display: flex;
+            font-size: 0.72rem;
+            gap: 0.55rem;
+            justify-content: space-between;
+            line-height: 1.4;
+            margin-top: 4rem;
+            padding-top: 1rem;
+        }
+        h1, h2, h3, p, label, button {letter-spacing: 0 !important;}
+        h1 {
+            color: var(--sf-text) !important;
+            font-size: 2.05rem !important;
+            font-weight: 660 !important;
+            line-height: 1.14 !important;
+            margin: 0 !important;
+        }
+        h2 {
+            color: var(--sf-text) !important;
+            font-size: 1.15rem !important;
+            font-weight: 640 !important;
+            line-height: 1.32 !important;
+            margin-top: 1.8rem !important;
+        }
+        h3 {
+            color: var(--sf-text) !important;
+            font-size: 1rem !important;
+            font-weight: 630 !important;
+            line-height: 1.35 !important;
+        }
+        p, label {line-height: 1.48;}
+        [data-testid="stCaptionContainer"] {color: var(--sf-muted);}
+        [data-testid="stSidebar"] {
+            background: var(--sf-subtle);
+            border-right: 1px solid var(--sf-border-soft);
+        }
+        [data-testid="stSidebarContent"] {padding-top: 1.5rem;}
+        [data-testid="stSidebar"] [data-testid="stRadio"] > div {gap: 0.14rem;}
+        [data-testid="stSidebar"] [role="radiogroup"] label {
+            border: 1px solid transparent;
+            border-radius: 7px;
+            color: #4a4a4f;
+            margin: 0;
+            min-height: 2.25rem;
+            padding: 0.48rem 0.62rem;
+            transition: background-color 120ms ease, border-color 120ms ease;
+            width: 100%;
+        }
+        [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+            background: rgba(255, 255, 255, 0.68);
+        }
+        [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+            background: var(--sf-surface);
+            border-color: var(--sf-border-soft);
+            color: var(--sf-text);
+            font-weight: 620;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.035);
+        }
+        [data-testid="stSidebar"] label[data-testid="stRadioOption"]
+            > div > div > div:first-child {
+            display: none;
+        }
+        [data-testid="stSidebar"] hr {border-color: var(--sf-border-soft);}
+        [data-testid="stMetric"] {
+            background: var(--sf-subtle);
+            border: 1px solid transparent;
+            border-radius: 7px;
+            min-height: 78px;
+            padding: 0.72rem 0.82rem;
+        }
+        [data-testid="stMetricLabel"] p {
+            color: var(--sf-muted) !important;
+            font-size: 0.72rem !important;
+            font-weight: 560;
+            line-height: 1.2;
+        }
+        [data-testid="stMetricValue"] {
+            color: var(--sf-text) !important;
+            font-size: 1.02rem !important;
+            font-weight: 640;
+            line-height: 1.22;
             overflow-wrap: anywhere;
         }
         [data-testid="stMetricValue"] > div {font-size: inherit !important; line-height: inherit;}
-        [data-testid="stSidebar"] {border-right: 1px solid #d8dee8;}
+        [data-testid="stForm"] {
+            background: var(--sf-surface);
+            border: 1px solid var(--sf-border-soft);
+            border-radius: 8px;
+            padding: 1.15rem 1.2rem 1.25rem;
+        }
+        [data-testid="stExpander"] {
+            background: transparent;
+            border-color: var(--sf-border-soft);
+            border-radius: 7px;
+            box-shadow: none;
+        }
+        [data-testid="stExpander"] summary:hover {background: var(--sf-subtle);}
+        [data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+            border: 1px solid var(--sf-border-soft);
+            border-radius: 7px;
+            overflow: hidden;
+        }
+        [data-baseweb="tab-list"] {
+            border-bottom: 1px solid var(--sf-border-soft);
+            gap: 1.25rem;
+        }
+        [data-baseweb="tab"] {
+            color: var(--sf-muted);
+            font-size: 0.86rem;
+            font-weight: 560;
+            min-height: 2.65rem;
+            padding-left: 0;
+            padding-right: 0;
+        }
+        [data-baseweb="tab"][aria-selected="true"] {
+            color: var(--sf-text);
+            font-weight: 630;
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-baseweb="select"] > div {
+            background: var(--sf-surface);
+            border-color: var(--sf-border);
+            border-radius: 7px;
+        }
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stNumberInput"] input:focus,
+        [data-testid="stTextArea"] textarea:focus {
+            border-color: var(--sf-blue);
+            box-shadow: 0 0 0 3px var(--sf-focus);
+        }
+        [data-testid="stBaseButton-primary"] {
+            background: var(--sf-blue);
+            border-color: var(--sf-blue);
+            border-radius: 7px;
+            box-shadow: none;
+            font-weight: 590;
+        }
+        [data-testid="stBaseButton-primary"]:hover {
+            background: var(--sf-blue-hover);
+            border-color: var(--sf-blue-hover);
+        }
+        [data-testid="stBaseButton-secondary"],
+        [data-testid="stDownloadButton"] button,
+        [data-testid="stLinkButton"] a {
+            background: var(--sf-surface);
+            border-color: var(--sf-border);
+            border-radius: 7px;
+            box-shadow: none;
+            color: var(--sf-text);
+            font-weight: 560;
+        }
+        [data-testid="stBaseButton-secondary"]:hover,
+        [data-testid="stDownloadButton"] button:hover,
+        [data-testid="stLinkButton"] a:hover {
+            background: var(--sf-subtle);
+            border-color: #bdbdc3;
+            color: var(--sf-text);
+        }
+        [data-testid="stAlert"] {border-radius: 7px;}
+        [data-testid="stProgressBar"] > div > div {background: var(--sf-blue);}
         [data-testid="stAppDeployButton"] {display: none;}
         .survey-flow {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 7px;
             overflow-x: auto;
-            padding: 4px 2px 12px;
+            padding: 0.25rem 0.1rem 0.8rem;
         }
         .survey-flow-node {
-            flex: 0 0 164px;
-            min-height: 126px;
-            border: 1px solid #cbd3de;
-            border-top: 4px solid #4d6f91;
-            border-radius: 6px;
-            padding: 12px;
-            background: #ffffff;
+            background: var(--sf-surface);
+            border: 1px solid var(--sf-border-soft);
+            border-top: 3px solid var(--sf-blue);
+            border-radius: 7px;
+            flex: 0 0 152px;
+            min-height: 112px;
+            padding: 0.72rem;
         }
-        .survey-flow-filter {border-top-color: #a65353;}
-        .survey-flow-enrichment {border-top-color: #397d73;}
-        .survey-flow-review {border-top-color: #66723f;}
-        .survey-flow-label {font-size: 0.82rem; font-weight: 650; line-height: 1.2;}
+        .survey-flow-filter {border-top-color: var(--sf-red);}
+        .survey-flow-enrichment {border-top-color: var(--sf-green);}
+        .survey-flow-review {border-top-color: #827027;}
+        .survey-flow-label {font-size: 0.76rem; font-weight: 630; line-height: 1.25;}
         .survey-flow-count {
-            font-size: 1.45rem;
-            font-weight: 700;
+            font-size: 1.28rem;
+            font-weight: 660;
             line-height: 1.25;
-            margin-top: 8px;
+            margin-top: 0.45rem;
         }
-        .survey-flow-change {font-size: 0.74rem; color: #596273; margin-top: 2px;}
-        .survey-flow-detail {font-size: 0.7rem; color: #6b7280; line-height: 1.25; margin-top: 8px;}
-        .survey-flow-arrow {flex: 0 0 auto; color: #6b7280; font-size: 1.2rem;}
+        .survey-flow-change {font-size: 0.7rem; color: var(--sf-muted); margin-top: 0.1rem;}
+        .survey-flow-detail {
+            color: var(--sf-muted);
+            font-size: 0.67rem;
+            line-height: 1.3;
+            margin-top: 0.45rem;
+        }
+        .survey-flow-arrow {flex: 0 0 auto; color: #9a9aa0; font-size: 1rem;}
         .survey-flow-loop {
             flex: 0 0 132px;
-            color: #397d73;
-            font-size: 0.76rem;
-            font-weight: 650;
+            color: var(--sf-green);
+            font-size: 0.72rem;
+            font-weight: 620;
             line-height: 1.3;
         }
-        h1, h2, h3, p, label, button {letter-spacing: 0 !important;}
+        @media (max-width: 800px) {
+            .block-container {padding: 3.75rem 1rem 3.5rem;}
+            h1 {font-size: 1.75rem !important;}
+            .sf-page-description {font-size: 0.92rem; margin-bottom: 1.6rem;}
+            [data-testid="stMetric"] {min-height: 72px; padding: 0.62rem 0.68rem;}
+            [data-testid="stMetricValue"] {font-size: 0.94rem !important;}
+            [data-baseweb="tab-list"] {gap: 0.45rem; overflow-x: auto;}
+            [data-baseweb="tab"] {font-size: 0.78rem;}
+            .sf-footer {align-items: flex-start; flex-direction: column; margin-top: 3rem;}
+            .survey-flow-node {flex-basis: 142px;}
+        }
         </style>
         """,
         unsafe_allow_html=True,

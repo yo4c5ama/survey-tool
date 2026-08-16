@@ -39,7 +39,6 @@ from vnn_survey.venue_quality import (
     write_venue_quality_summary,
 )
 
-
 app = typer.Typer(help="Literature collection tools for the transformer verification survey.")
 console = Console()
 
@@ -115,7 +114,9 @@ def collect_dblp(
         console.print(f"Generated {query_count} DBLP queries from {config}.")
         return
 
-    resolved_output_dir = _resolve_output_dir(output_dir, timestamped=timestamped, run_name=run_name)
+    resolved_output_dir = _resolve_output_dir(
+        output_dir, timestamped=timestamped, run_name=run_name
+    )
     console.print(f"Running DBLP collection with {query_count} queries via source={source}.")
     console.print(f"Writing outputs to {resolved_output_dir}.")
     result = collect_from_dblp(
@@ -196,7 +197,9 @@ def snowball_candidates_cmd(
     survey_config = load_config(config)
     resolved_output = output_path or input_path.with_name("candidate_papers_snowballed.csv")
     console.print(
-        "Running OpenAlex snowballing with "
+        "Running citation snowballing with "
+        f"providers={','.join(survey_config.snowballing.providers)}; "
+        f"strategy={survey_config.snowballing.provider_strategy}; "
         f"seed_file={seed_papers_path or survey_config.snowballing.seed_papers_path}; "
         f"input={input_path}"
     )
@@ -256,9 +259,7 @@ def filter_manual_includes_cmd(
 
 @app.command("prepare-audit-round")
 def prepare_audit_round_cmd(
-    input_path: Path = typer.Option(
-        ..., "--input", "-i", help="Current strict candidate CSV."
-    ),
+    input_path: Path = typer.Option(..., "--input", "-i", help="Current strict candidate CSV."),
     output_path: Path = typer.Option(..., "--output", "-o", help="New audit round CSV."),
     previous_audit_paths: list[Path] = typer.Option(
         [],
@@ -482,6 +483,13 @@ def llm_screen_cmd(
         "--model",
         help="Override the OpenAI model in the config.",
     ),
+    batch_size: int | None = typer.Option(
+        None,
+        "--batch-size",
+        min=1,
+        max=50,
+        help="Override the number of abstracts sent in each AI screening request.",
+    ),
     limit: int | None = typer.Option(
         None,
         "--limit",
@@ -503,6 +511,8 @@ def llm_screen_cmd(
     llm_config = survey_config.llm_screening
     if model:
         llm_config = replace(llm_config, model=model)
+    if batch_size:
+        llm_config = replace(llm_config, batch_size=batch_size)
 
     resolved_output = output_path or input_path.with_name("candidate_papers_llm_screened.csv")
     decisions = (
@@ -513,6 +523,7 @@ def llm_screen_cmd(
     console.print(
         "Running OpenAI LLM screening with "
         f"model={llm_config.model}; "
+        f"batch_size={llm_config.batch_size}; "
         f"decisions={screen_decisions or ','.join(llm_config.include_decisions)}; "
         f"input={input_path}"
     )
@@ -719,6 +730,10 @@ def _print_snowballing_summary(summary, output_path: Path, summary_path: Path) -
         table.add_row("relation", value or "empty", str(count))
     for value, count in summary.by_source.most_common():
         table.add_row("source", value or "empty", str(count))
+    for value, count in summary.provider_successes.most_common():
+        table.add_row("provider success", value, str(count))
+    for value, count in summary.provider_failures.most_common():
+        table.add_row("provider failure", value, str(count))
     console.print(table)
     console.print(f"Saved snowballed candidates to {output_path}")
     console.print(f"Saved snowballing summary to {summary_path}")
@@ -733,6 +748,9 @@ def _print_enrichment_summary(summary, output_path: Path, summary_path: Path) ->
     table.add_row("total", "eligible_rows", str(summary.eligible))
     table.add_row("total", "rows_with_abstract", str(summary.with_abstract))
     table.add_row("this_run", "attempted", str(summary.attempted))
+    table.add_row("this_run", "api_requests", str(summary.api_requests))
+    table.add_row("this_run", "batch_requests", str(summary.batch_requests))
+    table.add_row("this_run", "cache_hits", str(summary.cache_hits))
     table.add_row("this_run", "api_requests", str(getattr(summary, "api_requests", 0)))
     table.add_row("this_run", "batch_requests", str(getattr(summary, "batch_requests", 0)))
     table.add_row("this_run", "cache_hits", str(getattr(summary, "cache_hits", 0)))

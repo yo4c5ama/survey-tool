@@ -60,7 +60,8 @@ def create_audit_queue(
     seen: set[str] = set()
     for path in previous_audit_paths:
         _, previous_rows = read_csv(path)
-        seen.update(paper_key(row) for row in previous_rows)
+        for row in previous_rows:
+            seen.update(paper_keys(row))
 
     queue: list[dict[str, str]] = []
     emitted: set[str] = set()
@@ -70,14 +71,14 @@ def create_audit_queue(
             continue
         if not recommendation and row.get("auto_screening_decision") == "exclude":
             continue
-        key = paper_key(row)
-        if key in seen or key in emitted:
+        keys = paper_keys(row)
+        if keys & seen or keys & emitted:
             continue
         prepared = dict(row)
         prepared["manual_decision"] = ""
         prepared["manual_notes"] = ""
         queue.append(prepared)
-        emitted.add(key)
+        emitted.update(keys)
 
     write_csv(output_path, queue, [*fieldnames, "manual_decision", "manual_notes"])
     return len(rows), len(queue)
@@ -129,10 +130,36 @@ def paper_key(row: dict[str, str]) -> str:
     for field in ["doi", "dblp_key", "provider_id"]:
         value = (row.get(field) or "").strip().lower()
         if value:
+            if field == "doi":
+                value = _normalize_doi(value)
             return f"{field}:{value}"
     title = normalize_title(row.get("title", ""))
     year = (row.get("year") or "").strip()
     return f"title:{title}:{year}"
+
+
+def paper_keys(row: dict[str, str]) -> set[str]:
+    keys: set[str] = set()
+    for field in ["doi", "dblp_key", "provider_id"]:
+        value = (row.get(field) or "").strip().lower()
+        if value:
+            if field == "doi":
+                value = _normalize_doi(value)
+            keys.add(f"{field}:{value}")
+    title = normalize_title(row.get("title", ""))
+    year = (row.get("year") or "").strip()
+    if title:
+        keys.add(f"title:{title}")
+        keys.add(f"title_year:{title}:{year}")
+    return keys or {paper_key(row)}
+
+
+def _normalize_doi(value: str) -> str:
+    normalized = value.strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+    return normalized
 
 
 def read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:

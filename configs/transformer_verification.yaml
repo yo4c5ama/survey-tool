@@ -51,20 +51,25 @@ venue_quality:
 
 snowballing:
   # Manual/reviewer seed papers are listed here. The snowballing stage resolves
-  # them through OpenAlex, adds the seeds to the candidate pool, and collects
-  # backward references plus forward citations.
+  # them through the ordered citation providers, adds the seeds to the candidate
+  # pool, and collects backward references plus forward citations.
   seed_papers_path: configs/seed_papers.yaml
-  cache_dir: data/cache/openalex_snowballing
+  cache_dir: data/cache/snowballing
   # Re-fetch cached citation pages after one day so newly published citations
   # can enter later survey updates. Set to 0 to refresh every request.
   cache_ttl_hours: 24
   request_delay_seconds: 0.2
   timeout_seconds: 30
   retries: 3
-  # 0 means retrieve every reference/citation available from OpenAlex.
+  # 0 means retrieve every reference/citation exposed by the selected providers.
   max_backward_per_seed: 0
   max_forward_per_seed: 0
   include_seed_papers: true
+  providers: [semantic_scholar, opencitations]
+  # merge queries every provider; failover stops after the first successful one.
+  provider_strategy: merge
+  semantic_scholar_api_key_env: SEMANTIC_SCHOLAR_API_KEY
+  opencitations_access_token_env: OPENCITATIONS_ACCESS_TOKEN
   openalex_api_key_env: OPENALEX_API_KEY
   openalex_email_env: OPENALEX_EMAIL
 
@@ -77,6 +82,7 @@ llm_screening:
   request_delay_seconds: 0.2
   timeout_seconds: 60
   retries: 3
+  batch_size: 20
   max_output_tokens: 800
   prompt_version: transformer-verification-screen-v2-downstream
   system_prompt_path: configs/prompts/llm_screening_system.txt

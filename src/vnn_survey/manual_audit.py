@@ -5,7 +5,6 @@ from pathlib import Path
 
 from vnn_survey.models import normalize_title
 
-
 MANUAL_INCLUDE_DECISIONS = {"include", "include_related", "keep"}
 MANUAL_EXCLUDE_DECISIONS = {"exclude", "remove", "reject"}
 MANUAL_FIELDS = ["manual_decision", "manual_notes"]
@@ -102,6 +101,9 @@ def _write_csv(output_path: Path, input_fields: list[str], rows: list[dict[str, 
 def _paper_keys(row: dict[str, str]) -> set[str]:
     keys: set[str] = set()
     doi = (row.get("doi") or "").strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if doi.startswith(prefix):
+            doi = doi[len(prefix) :]
     if doi:
         keys.add(f"doi:{doi}")
     dblp_key = (row.get("dblp_key") or "").strip().lower()
@@ -113,6 +115,7 @@ def _paper_keys(row: dict[str, str]) -> set[str]:
     title = normalize_title(row.get("title", ""))
     year = (row.get("year") or "").strip()
     if title:
+        keys.add(f"title:{title}")
         keys.add(f"title:{title}:{year}")
     return keys
 

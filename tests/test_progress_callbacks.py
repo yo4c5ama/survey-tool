@@ -45,9 +45,7 @@ def test_abstract_enrichment_reports_item_progress(tmp_path: Path) -> None:
         tmp_path / "enriched.csv",
         EnrichmentConfig(providers=[]),
         decisions={"include_candidate", "needs_review"},
-        progress_callback=lambda completed, total, title: updates.append(
-            (completed, total, title)
-        ),
+        progress_callback=lambda completed, total, title: updates.append((completed, total, title)),
     )
 
     assert updates == [(0, 2, ""), (1, 2, "Paper One"), (2, 2, "Paper Two")]
@@ -77,12 +75,13 @@ def test_llm_screening_reports_item_progress(monkeypatch, tmp_path: Path) -> Non
         source,
         tmp_path / "screened.csv",
         LlmScreeningConfig(request_delay_seconds=0),
-        progress_callback=lambda completed, total, title: updates.append(
-            (completed, total, title)
-        ),
+        progress_callback=lambda completed, total, title: updates.append((completed, total, title)),
     )
 
-    assert updates == [(0, 2, ""), (1, 2, "Paper One"), (2, 2, "Paper Two")]
+    assert updates == [
+        (0, 2, "Existing results"),
+        (2, 2, "Batch 1/1; papers 1-2; API 0; cache 0"),
+    ]
 
 
 def test_dblp_progress_reports_deduplicated_candidate_count(monkeypatch, tmp_path: Path) -> None:

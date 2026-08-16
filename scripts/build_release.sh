@@ -20,6 +20,7 @@ zip -q -FS -r "$OUTPUT_FILE" \
     .streamlit/config.toml \
     src \
     configs/domain_profiles.yaml \
+    configs/model_pricing.yaml \
     configs/source_catalog.yaml \
     data/venue_quality \
     -x "*/__pycache__/*" "*.pyc"

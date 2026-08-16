@@ -46,6 +46,9 @@ class ProjectSettings:
     include_arxiv: bool = True
     include_informal: bool = True
     llm_model: str = "gpt-5.4-mini"
+    title_screening_model: str = "gpt-5.4-mini"
+    prompt_refinement_model: str = "gpt-5.4-mini"
+    prompt_replay_model: str = "gpt-5.4-mini"
     paper_qa_model: str = "gpt-5.4"
     corpus_analysis_model: str = "gpt-5.4"
     llm_base_url: str = "https://api.openai.com/v1"
@@ -59,6 +62,7 @@ class ProjectSettings:
         ]
     )
     abstract_batch_size: int = 100
+    llm_screen_batch_size: int = 20
     scholarly_api_email: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -79,9 +83,7 @@ class ProjectSettings:
                 if isinstance(item, dict)
             ],
             research_domain=str(value.get("research_domain") or "computer_science"),
-            discovery_sources=[
-                str(item) for item in value.get("discovery_sources", ["dblp"])
-            ]
+            discovery_sources=[str(item) for item in value.get("discovery_sources", ["dblp"])]
             or ["dblp"],
             inclusion_criteria=[str(item) for item in value.get("inclusion_criteria", [])],
             exclusion_criteria=[str(item) for item in value.get("exclusion_criteria", [])],
@@ -89,13 +91,18 @@ class ProjectSettings:
             include_arxiv=bool(value.get("include_arxiv", True)),
             include_informal=bool(value.get("include_informal", True)),
             llm_model=str(value.get("llm_model") or "gpt-5.4-mini"),
-            paper_qa_model=str(
-                value.get("paper_qa_model") or value.get("llm_model") or "gpt-5.4"
+            title_screening_model=str(
+                value.get("title_screening_model") or value.get("llm_model") or "gpt-5.4-mini"
             ),
+            prompt_refinement_model=str(
+                value.get("prompt_refinement_model") or value.get("llm_model") or "gpt-5.4-mini"
+            ),
+            prompt_replay_model=str(
+                value.get("prompt_replay_model") or value.get("llm_model") or "gpt-5.4-mini"
+            ),
+            paper_qa_model=str(value.get("paper_qa_model") or value.get("llm_model") or "gpt-5.4"),
             corpus_analysis_model=str(
-                value.get("corpus_analysis_model")
-                or value.get("llm_model")
-                or "gpt-5.4"
+                value.get("corpus_analysis_model") or value.get("llm_model") or "gpt-5.4"
             ),
             llm_base_url=str(value.get("llm_base_url") or "https://api.openai.com/v1"),
             abstract_providers=[
@@ -106,6 +113,10 @@ class ProjectSettings:
                 )
             ],
             abstract_batch_size=max(1, int(value.get("abstract_batch_size") or 100)),
+            llm_screen_batch_size=max(
+                1,
+                min(50, int(value.get("llm_screen_batch_size") or 20)),
+            ),
             scholarly_api_email=str(value.get("scholarly_api_email") or ""),
             created_at=str(value.get("created_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
@@ -155,6 +166,9 @@ class ProjectStore:
         include_arxiv: bool = True,
         include_informal: bool = True,
         llm_model: str = "gpt-5.4-mini",
+        title_screening_model: str = "gpt-5.4-mini",
+        prompt_refinement_model: str = "gpt-5.4-mini",
+        prompt_replay_model: str = "gpt-5.4-mini",
         paper_qa_model: str = "gpt-5.4",
         corpus_analysis_model: str = "gpt-5.4",
         llm_base_url: str = "https://api.openai.com/v1",
@@ -184,6 +198,9 @@ class ProjectStore:
             include_arxiv=include_arxiv,
             include_informal=include_informal,
             llm_model=llm_model.strip(),
+            title_screening_model=title_screening_model.strip(),
+            prompt_refinement_model=prompt_refinement_model.strip(),
+            prompt_replay_model=prompt_replay_model.strip(),
             paper_qa_model=paper_qa_model.strip(),
             corpus_analysis_model=corpus_analysis_model.strip(),
             llm_base_url=llm_base_url.strip(),
@@ -218,7 +235,11 @@ class ProjectStore:
             for field in (
                 "abstract_providers",
                 "abstract_batch_size",
+                "llm_screen_batch_size",
                 "scholarly_api_email",
+                "title_screening_model",
+                "prompt_refinement_model",
+                "prompt_replay_model",
             )
         ):
             _write_json(path, settings.to_dict())
@@ -468,6 +489,10 @@ class ProjectStore:
                 "max_backward_per_seed": 0,
                 "max_forward_per_seed": 0,
                 "include_seed_papers": True,
+                "providers": ["semantic_scholar", "opencitations"],
+                "provider_strategy": "merge",
+                "semantic_scholar_api_key_env": "SEMANTIC_SCHOLAR_API_KEY",
+                "opencitations_access_token_env": "OPENCITATIONS_ACCESS_TOKEN",
                 "openalex_api_key_env": "OPENALEX_API_KEY",
                 "openalex_email_env": "OPENALEX_EMAIL",
             },
@@ -480,6 +505,7 @@ class ProjectStore:
                 "request_delay_seconds": 0.2,
                 "timeout_seconds": 60,
                 "retries": 3,
+                "batch_size": settings.llm_screen_batch_size,
                 "max_output_tokens": 800,
                 "prompt_version": f"surveyflow-{settings.slug}-v1",
                 "system_prompt_path": str(self.system_prompt_path(settings.slug).resolve()),

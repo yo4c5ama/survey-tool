@@ -1,0 +1,53 @@
+# Fallback prices for SurveyFlow cost estimates. Prices are USD per 1M tokens.
+# The app can refresh a selected OpenAI model from its official model page.
+# Update or extend this file for models that do not have a public OpenAI page.
+last_updated: "2026-08-16"
+source_url: https://developers.openai.com/api/docs/models
+screening_output_tokens_per_paper: 220
+
+models:
+  gpt-5.4-mini:
+    input_per_million: 0.75
+    cached_input_per_million: 0.075
+    output_per_million: 4.50
+    aliases:
+      - gpt-5.4-mini-2026-03-17
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.4-mini
+
+  gpt-5.4:
+    input_per_million: 2.50
+    cached_input_per_million: 0.25
+    output_per_million: 15.00
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.4
+
+  gpt-5.4-nano:
+    input_per_million: 0.20
+    cached_input_per_million: 0.02
+    output_per_million: 1.25
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.4-nano
+
+  gpt-5.5:
+    input_per_million: 5.00
+    cached_input_per_million: 0.50
+    output_per_million: 30.00
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.5
+
+  gpt-5.6-luna:
+    input_per_million: 1.00
+    cached_input_per_million: 0.10
+    output_per_million: 6.00
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.6-luna
+
+  gpt-5.6-terra:
+    input_per_million: 2.50
+    cached_input_per_million: 0.25
+    output_per_million: 15.00
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.6-terra
+
+  gpt-5.6-sol:
+    input_per_million: 5.00
+    cached_input_per_million: 0.50
+    output_per_million: 30.00
+    aliases:
+      - gpt-5.6
+    source_url: https://developers.openai.com/api/docs/models/gpt-5.6-sol

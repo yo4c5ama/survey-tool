@@ -89,3 +89,36 @@ def test_flow_svg_hides_enrichment_and_places_manual_additions_before_audit() ->
     assert "Abstract enrichment" not in svg
     assert "Manual venue enrichment" not in svg
     assert svg.index("Manual additions") < svg.index("Human audit")
+
+
+def test_display_flow_compacts_snowball_details_without_changing_export() -> None:
+    details = {
+        "new papers": 787,
+        "resolved seeds": 19,
+        "references available": 838,
+        "references fetched": 793,
+        "citations available": 272,
+        "citations fetched": 309,
+        "provider strategy": "merge",
+        "providers": ["openalex", "semantic_scholar", "opencitations"],
+        "provider successes": {"openalex": 38},
+        "provider failures": {"semantic_scholar": 12},
+        "complete seed coverage": 6,
+        "partial seed coverage": 13,
+        "failed seed coverage": 1,
+    }
+    round_state = {"index": 1, "kind": "snowball", "status": "ready", "flow": []}
+    record_flow_stage(
+        round_state,
+        key="citation_snowballing",
+        label="Citation snowballing",
+        input_count=19,
+        retained_count=787,
+        stage_type="discovery",
+        details=details,
+    )
+    state = {"run_id": "run-snowball", "status": "ready", "rounds": [round_state]}
+
+    assert round_flow_stages(round_state)[0]["details"] == {"Coverage warnings": 14}
+    exported = flow_summary_payload(state)["rounds"][0]["stages"][0]["details"]
+    assert exported == details

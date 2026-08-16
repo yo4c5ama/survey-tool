@@ -60,6 +60,9 @@ def test_project_persists_domain_and_sources_in_pipeline_config(tmp_path: Path) 
     assert config.discovery.sources == ["openalex", "crossref"]
     assert project.paper_qa_model
     assert project.corpus_analysis_model
+    assert project.title_screening_model
+    assert project.prompt_refinement_model
+    assert project.prompt_replay_model
     assert config.enrichment.providers == [
         "arxiv",
         "pubmed",
@@ -68,6 +71,8 @@ def test_project_persists_domain_and_sources_in_pipeline_config(tmp_path: Path) 
         "openalex",
     ]
     assert config.enrichment.batch_size == 100
+    assert project.llm_screen_batch_size == 20
+    assert config.llm_screening.batch_size == 20
 
 
 def test_legacy_project_migrates_abstract_provider_config(tmp_path: Path) -> None:
@@ -76,7 +81,12 @@ def test_legacy_project_migrates_abstract_provider_config(tmp_path: Path) -> Non
     value = json.loads(project_path.read_text(encoding="utf-8"))
     value.pop("abstract_providers")
     value.pop("abstract_batch_size")
+    value.pop("llm_screen_batch_size")
     value.pop("scholarly_api_email")
+    legacy_model = value["llm_model"]
+    value.pop("title_screening_model")
+    value.pop("prompt_refinement_model")
+    value.pop("prompt_replay_model")
     project_path.write_text(json.dumps(value), encoding="utf-8")
 
     project = store.load_project(slug)
@@ -84,6 +94,11 @@ def test_legacy_project_migrates_abstract_provider_config(tmp_path: Path) -> Non
 
     assert project.abstract_providers[0] == "arxiv"
     assert config.enrichment.providers == project.abstract_providers
+    assert project.llm_screen_batch_size == 20
+    assert config.llm_screening.batch_size == 20
+    assert project.title_screening_model == legacy_model
+    assert project.prompt_refinement_model == legacy_model
+    assert project.prompt_replay_model == legacy_model
 
 
 def test_discovery_parsers_retain_native_abstracts() -> None:

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from shutil import copy2
 from threading import get_ident
 from typing import Any
 
@@ -24,6 +25,7 @@ from vnn_survey.app.audit import (
     create_manual_recommendations,
     load_audit,
     paper_key,
+    paper_keys,
     read_csv,
     summarize_audit,
     update_audit_rows,
@@ -38,6 +40,14 @@ from vnn_survey.enrichment import enrich_candidates, write_enrichment_summary
 from vnn_survey.export import write_csv, write_jsonl
 from vnn_survey.llm_screening import llm_screen_candidates, write_llm_screening_summary
 from vnn_survey.llm_summary import summarize_llm_screening
+from vnn_survey.manual_audit import filter_manual_includes
+from vnn_survey.model_pricing import (
+    estimate_token_cost,
+    get_model_price,
+    is_openai_api_base_url,
+    output_tokens_per_paper,
+    refresh_openai_model_price,
+)
 from vnn_survey.models import PaperRecord
 from vnn_survey.pipeline import (
     collect_from_sources,
@@ -51,8 +61,10 @@ from vnn_survey.prompt_refinement import (
 from vnn_survey.prompt_refinement import load_prompt_refinement
 from vnn_survey.screening import screen_candidates
 from vnn_survey.snowballing import (
+    SnowballingResult,
     export_seed_papers_from_csv,
     snowball_candidates,
+    write_seed_coverage_report,
     write_snowballing_summary,
 )
 from vnn_survey.title_screening import (
@@ -88,8 +100,12 @@ CORPUS_ANALYSIS_STAGES = [
     "Paper classification",
     "Analysis report",
 ]
-AI_REVIEW_STAGES = ["AI screening", "Recommendation summary", "Audit queue"]
-MANUAL_REVIEW_STAGES = ["Review preparation", "Audit queue"]
+AI_REVIEW_STAGES = [
+    "AI abstract screening",
+    "Recommendation summary",
+    "Create manual review queue",
+]
+MANUAL_REVIEW_STAGES = ["Prepare recommendations", "Create manual review queue"]
 PROMPT_REFINEMENT_STAGES = ["Learning from manual audit", "Prompt proposal"]
 SNOWBALL_STAGES = [
     "Citation snowballing",
@@ -123,8 +139,10 @@ class PipelineService:
         selected_sources = list(dict.fromkeys(source_ids or settings.discovery_sources))
         if not selected_sources:
             raise ValueError("Select at least one available literature source.")
-        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
-            "OPENAI_API_KEY"
+        if (
+            use_title_llm
+            and not self.store.has_api_key(project_slug)
+            and not os.environ.get("OPENAI_API_KEY")
         ):
             raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
         run_id = _new_run_id()
@@ -168,9 +186,7 @@ class PipelineService:
                 "Literature search",
                 "Collecting bibliographic records from the selected sources.",
             )
-            manual_records = ManualPaperStore(
-                self.store.project_dir(project_slug)
-            ).load()
+            manual_records = ManualPaperStore(self.store.project_dir(project_slug)).load()
             result = collect_from_sources(
                 config,
                 console=Console(file=io.StringIO(), no_color=True),
@@ -261,9 +277,7 @@ class PipelineService:
             round_state["counts"].update(
                 {
                     "deduped_records": int(collection_summary["deduped_records"]),
-                    "rule_excluded": screening_result.summary.by_decision.get(
-                        "exclude", 0
-                    ),
+                    "rule_excluded": screening_result.summary.by_decision.get("exclude", 0),
                     **_title_screening_counts(title_result),
                 }
             )
@@ -311,9 +325,7 @@ class PipelineService:
                 else rule_retained
             )
             round_state["files"]["venues"] = str(venue_path)
-            round_state["files"]["publication_resolution"] = str(
-                publication_resolution_path
-            )
+            round_state["files"]["publication_resolution"] = str(publication_resolution_path)
             record_flow_stage(
                 round_state,
                 key="venue_enrichment",
@@ -482,8 +494,10 @@ class PipelineService:
         core_online = bool(options.get("core_online", True))
         use_title_llm = bool(options.get("title_llm_enabled", False))
         title_batch_size = int(options.get("title_llm_batch_size", 100))
-        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
-            "OPENAI_API_KEY"
+        if (
+            use_title_llm
+            and not self.store.has_api_key(project_slug)
+            and not os.environ.get("OPENAI_API_KEY")
         ):
             raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
 
@@ -540,12 +554,8 @@ class PipelineService:
                 collection_summary = {
                     **round_state.get("counts", {}),
                     **collection_summary,
-                    "raw_records": int(
-                        collection_summary.get("raw_records", deduped)
-                    ),
-                    "filtered_records": int(
-                        collection_summary.get("filtered_records", deduped)
-                    ),
+                    "raw_records": int(collection_summary.get("raw_records", deduped)),
+                    "filtered_records": int(collection_summary.get("filtered_records", deduped)),
                     "deduped_records": deduped,
                 }
 
@@ -592,9 +602,7 @@ class PipelineService:
                     "total": screening_result.summary.total,
                     "by_decision": dict(screening_result.summary.by_decision),
                     "by_bucket": dict(screening_result.summary.by_bucket),
-                    "by_exclusion_code": dict(
-                        screening_result.summary.by_exclusion_code
-                    ),
+                    "by_exclusion_code": dict(screening_result.summary.by_exclusion_code),
                 },
             )
             rule_excluded = screening_result.summary.by_decision.get("exclude", 0)
@@ -687,9 +695,7 @@ class PipelineService:
                     ),
                 }
             round_state["files"]["venues"] = str(venue_path)
-            round_state["files"]["publication_resolution"] = str(
-                publication_resolution_path
-            )
+            round_state["files"]["publication_resolution"] = str(publication_resolution_path)
             record_flow_stage(
                 round_state,
                 key="venue_enrichment",
@@ -698,9 +704,7 @@ class PipelineService:
                 retained_count=enrichment_input_count,
                 stage_type="enrichment",
                 details={
-                    "CORE ranks found": int(
-                        venue_summary.get("conferences_with_core_rank", 0)
-                    ),
+                    "CORE ranks found": int(venue_summary.get("conferences_with_core_rank", 0)),
                     "impact factors found": int(
                         venue_summary.get("journals_with_impact_factor", 0)
                     ),
@@ -754,9 +758,7 @@ class PipelineService:
                         0,
                     ),
                     "abstract_cache_hits": enrichment_result.summary.cache_hits,
-                    "abstract_rate_limit_retries": (
-                        enrichment_result.summary.rate_limit_retries
-                    ),
+                    "abstract_rate_limit_retries": (enrichment_result.summary.rate_limit_retries),
                     "abstract_rate_limit_wait_seconds": (
                         enrichment_result.summary.rate_limit_wait_seconds
                     ),
@@ -814,8 +816,10 @@ class PipelineService:
         run_options = state.get("options", {})
         use_title_llm = bool(run_options.get("title_llm_enabled", False))
         title_batch_size = int(run_options.get("title_llm_batch_size", 100))
-        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
-            "OPENAI_API_KEY"
+        if (
+            use_title_llm
+            and not self.store.has_api_key(project_slug)
+            and not os.environ.get("OPENAI_API_KEY")
         ):
             raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
         initial_round = _get_round(state, 0)
@@ -836,8 +840,7 @@ class PipelineService:
         candidate_records = [
             record
             for row in candidate_rows
-            if (record := _without_manual_provenance(PaperRecord.from_dict(row)))
-            is not None
+            if (record := _without_manual_provenance(PaperRecord.from_dict(row))) is not None
         ]
         tracked_progress = self._begin_progress(
             project_slug,
@@ -867,8 +870,7 @@ class PipelineService:
             initial_round["flow"] = [
                 stage
                 for stage in initial_round.get("flow", [])
-                if stage.get("key")
-                in {"literature_search", "metadata_filter", "deduplication"}
+                if stage.get("key") in {"literature_search", "metadata_filter", "deduplication"}
             ]
             record_flow_stage(
                 initial_round,
@@ -899,9 +901,7 @@ class PipelineService:
                     "total": screening_result.summary.total,
                     "by_decision": dict(screening_result.summary.by_decision),
                     "by_bucket": dict(screening_result.summary.by_bucket),
-                    "by_exclusion_code": dict(
-                        screening_result.summary.by_exclusion_code
-                    ),
+                    "by_exclusion_code": dict(screening_result.summary.by_exclusion_code),
                 },
             )
             rule_excluded = screening_result.summary.by_decision.get("exclude", 0)
@@ -927,9 +927,7 @@ class PipelineService:
             initial_round["counts"].update(
                 {
                     "deduped_records": len(merged),
-                    "rule_excluded": screening_result.summary.by_decision.get(
-                        "exclude", 0
-                    ),
+                    "rule_excluded": screening_result.summary.by_decision.get("exclude", 0),
                     **_title_screening_counts(title_result),
                 }
             )
@@ -977,9 +975,7 @@ class PipelineService:
                 else rule_retained
             )
             initial_round["files"]["venues"] = str(venue_path)
-            initial_round["files"]["publication_resolution"] = str(
-                publication_resolution_path
-            )
+            initial_round["files"]["publication_resolution"] = str(publication_resolution_path)
             record_flow_stage(
                 initial_round,
                 key="venue_enrichment",
@@ -1065,11 +1061,7 @@ class PipelineService:
                 {
                     "venues": str(venue_path),
                     "screened": str(screened_path),
-                    **(
-                        {"title_screened": str(title_input)}
-                        if title_result is not None
-                        else {}
-                    ),
+                    **({"title_screened": str(title_input)} if title_result is not None else {}),
                     "enriched": str(enriched_path),
                 }
             )
@@ -1077,9 +1069,7 @@ class PipelineService:
                 {
                     "deduped_records": len(merged),
                     "manual_records": len(manual_records),
-                    "rule_excluded": screening_result.summary.by_decision.get(
-                        "exclude", 0
-                    ),
+                    "rule_excluded": screening_result.summary.by_decision.get("exclude", 0),
                     **_title_screening_counts(title_result),
                     "publication_resolution_attempted": getattr(
                         venue_result.summary,
@@ -1131,7 +1121,12 @@ class PipelineService:
     ) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
         round_state = _get_round(state, round_index)
-        if round_state.get("status") not in {"discovery_complete", "ready_for_review", "failed"}:
+        if round_state.get("status") not in {
+            "discovery_complete",
+            "citation_incomplete",
+            "ready_for_review",
+            "failed",
+        }:
             raise RuntimeError("This round is not ready for AI screening or review preparation.")
         if not round_state.get("files", {}).get("enriched"):
             raise RuntimeError("This round does not have an enriched candidate file.")
@@ -1139,25 +1134,66 @@ class PipelineService:
         processed_dir = Path(round_state["files"]["enriched"]).parent
         suffix = "" if round_index == 0 else f"_round_{round_index}"
         enriched_path = Path(round_state["files"]["enriched"])
+        _annotate_legacy_snowball_coverage(enriched_path, round_state)
+        replay_requested = _round_prompt_replay_requested(state, round_state)
+        if (
+            (use_llm or replay_requested)
+            and not self.store.has_api_key(project_slug)
+            and not os.environ.get("OPENAI_API_KEY")
+        ):
+            raise RuntimeError("Save or provide an OpenAI API key before AI screening.")
         tracked_progress = self._begin_progress(
             project_slug,
             state,
-            operation="AI screening" if use_llm else "Review preparation",
+            operation="AI abstract screening and review" if use_llm else "Review preparation",
             heading="Preparing the review queue",
-            stages=AI_REVIEW_STAGES if use_llm else MANUAL_REVIEW_STAGES,
+            stages=_with_prompt_replay_stage(
+                AI_REVIEW_STAGES if use_llm else MANUAL_REVIEW_STAGES,
+                replay_requested,
+            ),
             callback=progress,
             paper_count=_round_paper_count(round_state),
         )
 
         try:
-            if use_llm:
-                if not self.store.has_api_key(project_slug) and not os.environ.get(
-                    "OPENAI_API_KEY"
-                ):
-                    raise RuntimeError("Save or provide an OpenAI API key before AI screening.")
+            if replay_requested:
                 _notify(
                     tracked_progress,
-                    "AI screening",
+                    "Re-screen initial AI exclusions",
+                    "Applying the approved prompt to initial AI exclusions.",
+                )
+                replay_files, replay_counts = self._replay_initial_ai_exclusions(
+                    project_slug=project_slug,
+                    state=state,
+                    round_index=round_index,
+                    enriched_path=enriched_path,
+                    config=config,
+                    processed_dir=processed_dir,
+                    progress=tracked_progress,
+                )
+                round_state["files"].update(replay_files)
+                round_state["counts"].update(replay_counts)
+                record_flow_stage(
+                    round_state,
+                    key="prompt_replay",
+                    label="Re-screen initial AI exclusions",
+                    input_count=replay_counts["replayed"],
+                    retained_count=replay_counts["recovered"],
+                    excluded_count=replay_counts["reexcluded"],
+                    details={
+                        "human-reviewed removed before AI": replay_counts[
+                            "replay_reviewed_removed"
+                        ],
+                        "eligible after review removal": replay_counts["replay_eligible"],
+                        "failed": replay_counts["failed"],
+                    },
+                )
+                self._save_state(project_slug, state)
+
+            if use_llm:
+                _notify(
+                    tracked_progress,
+                    "AI abstract screening",
                     "Analyzing candidate abstracts with the configured model.",
                 )
                 llm_path = processed_dir / f"candidate_papers_llm_screened{suffix}.csv"
@@ -1168,7 +1204,7 @@ class PipelineService:
                     limit=llm_limit,
                     progress_callback=_item_progress(
                         tracked_progress,
-                        "AI screening",
+                        "AI abstract screening",
                         "Analyzing candidate abstracts with the configured model.",
                     ),
                 )
@@ -1194,11 +1230,13 @@ class PipelineService:
                 round_state["files"]["llm_report"] = str(report_path)
                 round_state["counts"]["llm_screened"] = llm_result.summary.attempted
                 round_state["counts"]["llm_failed"] = llm_result.summary.by_status.get("failed", 0)
+                round_state["counts"]["llm_api_requests"] = llm_result.summary.api_requests
+                round_state["counts"]["llm_batch_requests"] = llm_result.summary.batch_requests
+                round_state["counts"]["llm_cache_hits"] = llm_result.summary.cache_hits
                 llm_excluded = llm_result.summary.by_decision.get("exclude", 0)
-                llm_retained = (
-                    llm_result.summary.by_decision.get("include", 0)
-                    + llm_result.summary.by_decision.get("maybe", 0)
-                )
+                llm_retained = llm_result.summary.by_decision.get(
+                    "include", 0
+                ) + llm_result.summary.by_decision.get("maybe", 0)
                 record_flow_stage(
                     round_state,
                     key="ai_abstract_screening",
@@ -1206,12 +1244,17 @@ class PipelineService:
                     input_count=llm_result.summary.eligible,
                     retained_count=llm_retained,
                     excluded_count=llm_excluded,
-                    details={"failed": llm_result.summary.by_status.get("failed", 0)},
+                    details={
+                        "failed": llm_result.summary.by_status.get("failed", 0),
+                        "API requests": llm_result.summary.api_requests,
+                        "batch requests": llm_result.summary.batch_requests,
+                        "cache hits": llm_result.summary.cache_hits,
+                    },
                 )
             else:
                 _notify(
                     tracked_progress,
-                    "Review preparation",
+                    "Prepare recommendations",
                     "Creating a human-only review queue.",
                 )
                 recommendation_path = processed_dir / f"final_screening_recommendations{suffix}.csv"
@@ -1219,7 +1262,7 @@ class PipelineService:
 
             _notify(
                 tracked_progress,
-                "Audit queue",
+                "Create manual review queue",
                 "Deduplicating and creating the manual audit file.",
             )
             audit_dir = self.store.project_dir(project_slug) / "audits" / state["run_id"]
@@ -1234,6 +1277,12 @@ class PipelineService:
                 audit_path,
                 previous_audit_paths=previous_audits,
             )
+            audit_checkpoint = round_state.get("files", {}).get("audit_checkpoint")
+            if audit_checkpoint and Path(audit_checkpoint).exists():
+                queue_count = _restore_audit_checkpoint(
+                    audit_path,
+                    Path(audit_checkpoint),
+                ).total
             round_state["files"].update(
                 {
                     "recommendations": str(recommendation_path),
@@ -1252,8 +1301,11 @@ class PipelineService:
                 excluded_count=max(recommendation_count - queue_count, 0),
                 stage_type="review",
             )
+            failed_coverage_seeds = _failed_seed_coverage_count(round_state)
             round_state["status"] = (
-                "converged" if round_index > 0 and queue_count == 0 else "ready_for_review"
+                "converged"
+                if round_index > 0 and queue_count == 0 and failed_coverage_seeds == 0
+                else "ready_for_review"
             )
             state["status"] = (
                 "converged" if round_state["status"] == "converged" else "awaiting_manual_review"
@@ -1281,6 +1333,8 @@ class PipelineService:
         self,
         project_slug: str,
         *,
+        citation_providers: list[str] | None = None,
+        provider_strategy: str | None = None,
         max_backward_per_seed: int = 0,
         max_forward_per_seed: int = 0,
         enrich_limit: int | None = None,
@@ -1288,30 +1342,61 @@ class PipelineService:
         use_title_llm: bool = False,
         title_batch_size: int = 100,
         replay_initial_exclusions: bool = False,
+        target_seed: dict[str, str] | None = None,
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
-        if use_title_llm and not self.store.has_api_key(project_slug) and not os.environ.get(
-            "OPENAI_API_KEY"
+        retry_round = _retryable_snowball_round(state)
+        if target_seed is None and retry_round and isinstance(retry_round.get("target_seed"), dict):
+            target_seed = dict(retry_round["target_seed"])
+        normalized_target_seed = _normalize_target_seed(target_seed)
+        targeted_snowball = normalized_target_seed is not None
+        replay_state = _ensure_prompt_replay_state(state)
+        replay_completed_in_retry_round = bool(
+            retry_round
+            and replay_state.get("status") == "completed"
+            and str(replay_state.get("replay_round", "")) == str(retry_round.get("index", ""))
+        )
+        if (
+            retry_round
+            and state.get("options", {}).get("replay_initial_exclusions")
+            and replay_completed_in_retry_round
+        ):
+            replay_initial_exclusions = True
+        if (
+            use_title_llm
+            and not self.store.has_api_key(project_slug)
+            and not os.environ.get("OPENAI_API_KEY")
         ):
             raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
         if replay_initial_exclusions:
-            refinement = state.get("prompt_refinement", {})
-            if refinement.get("status") != "approved":
+            if replay_state.get("status") not in {"pending", "completed"}:
                 raise RuntimeError(
                     "Approve a refined screening prompt before replaying AI exclusions."
                 )
-            if refinement.get("replay_status") == "completed":
-                raise RuntimeError(
-                    "The initial AI exclusions were already replayed with this prompt."
-                )
-            if not self.store.has_api_key(project_slug) and not os.environ.get(
-                "OPENAI_API_KEY"
-            ):
+            if replay_state.get("status") == "completed" and not replay_completed_in_retry_round:
+                raise RuntimeError("The initial AI exclusions were already replayed once.")
+            if not self.store.has_api_key(project_slug) and not os.environ.get("OPENAI_API_KEY"):
                 raise RuntimeError(
                     "Save or provide an OpenAI API key before replaying AI exclusions."
                 )
-        completed_rounds = [item for item in state["rounds"] if item.get("files", {}).get("audit")]
+        latest_state_round = state["rounds"][-1]
+        if (
+            retry_round is None
+            and latest_state_round.get("kind") == "snowball"
+            and not latest_state_round.get("files", {}).get("audit")
+            and latest_state_round.get("status")
+            in {"discovery_complete", "citation_incomplete", "ready_for_review"}
+        ):
+            raise RuntimeError(
+                "Prepare the current snowball round for manual review before starting "
+                "another round."
+            )
+        completed_rounds = [
+            item
+            for item in state["rounds"]
+            if item.get("files", {}).get("audit") and item is not retry_round
+        ]
         if not completed_rounds:
             raise RuntimeError("Complete the initial review before snowballing.")
         latest_round = completed_rounds[-1]
@@ -1320,23 +1405,120 @@ class PipelineService:
             raise RuntimeError("Finish every paper in the current audit round before snowballing.")
 
         project_dir = self.store.project_dir(project_slug)
+        pending_round_index = (
+            int(retry_round["index"])
+            if retry_round is not None
+            else max(int(item["index"]) for item in state["rounds"]) + 1
+        )
         audit_paths = [Path(item["files"]["audit"]) for item in completed_rounds]
         cumulative_path = project_dir / "audits" / state["run_id"] / "cumulative.csv"
-        included_path = project_dir / "audits" / state["run_id"] / "included.csv"
-        _, _, included_count = build_cumulative_audit(audit_paths, cumulative_path, included_path)
-        if not included_count:
-            raise RuntimeError("At least one paper must be included before snowballing.")
-
-        seed_path = project_dir / "seeds" / f"{state['run_id']}_current.yaml"
-        seed_result = export_seed_papers_from_csv(
-            included_path,
-            seed_path,
-            source_label="manual_audit_include",
+        cumulative_included_path = project_dir / "audits" / state["run_id"] / "included.csv"
+        build_cumulative_audit(audit_paths, cumulative_path, cumulative_included_path)
+        included_path = (
+            project_dir / "audits" / state["run_id"] / f"round_{latest_round['index']}_included.csv"
         )
-        round_index = max(int(item["index"]) for item in state["rounds"]) + 1
-        round_state = _new_round_state(index=round_index, kind="snowball")
-        round_state["counts"]["seeds"] = len(seed_result.seeds)
-        state["rounds"].append(round_state)
+        filter_manual_includes(Path(latest_round["files"]["audit"]), included_path)
+
+        if targeted_snowball:
+            seed_input_path = (
+                project_dir
+                / "seeds"
+                / f"{state['run_id']}_targeted_round_{pending_round_index}.csv"
+            )
+            target_fields = list(normalized_target_seed)
+            write_audit_csv(seed_input_path, [normalized_target_seed], target_fields)
+            seed_source_label = "targeted_single_paper"
+        else:
+            included_count = _write_incremental_snowball_candidates(
+                included_path,
+                included_path,
+                prior_paths=audit_paths[:-1],
+            )
+            if not included_count:
+                raise RuntimeError(
+                    "The latest review round has no newly included papers to use as snowball seeds."
+                )
+            seed_input_path = included_path
+            seed_source_label = f"manual_audit_round_{latest_round['index']}_include"
+
+        seed_path = project_dir / "seeds" / f"{state['run_id']}_round_{pending_round_index}.yaml"
+        seed_result = export_seed_papers_from_csv(
+            seed_input_path,
+            seed_path,
+            source_label=seed_source_label,
+        )
+        if not seed_result.seeds:
+            raise RuntimeError("The selected paper could not be converted into a snowball seed.")
+        config = load_config(self.store.config_path(project_slug))
+        selected_providers = list(dict.fromkeys(citation_providers or config.snowballing.providers))
+        if not selected_providers:
+            raise RuntimeError("Select at least one citation provider before snowballing.")
+        unsupported = [
+            provider
+            for provider in selected_providers
+            if provider not in {"semantic_scholar", "opencitations", "openalex"}
+        ]
+        if unsupported:
+            raise RuntimeError(f"Unsupported citation providers: {', '.join(unsupported)}")
+        selected_strategy = (
+            str(provider_strategy or config.snowballing.provider_strategy).strip().lower()
+        )
+        if selected_strategy not in {"merge", "failover"}:
+            raise RuntimeError("Citation provider strategy must be merge or failover.")
+        query_providers = _retry_provider_order(retry_round, selected_providers)
+        config = replace(
+            config,
+            snowballing=replace(
+                config.snowballing,
+                providers=query_providers,
+                provider_strategy=selected_strategy,
+            ),
+        )
+        if retry_round is not None:
+            round_state = retry_round
+            round_index = int(round_state["index"])
+            retry_count = int(round_state.get("counts", {}).get("retry_count") or 0) + 1
+            existing_files = dict(round_state.get("files", {}))
+            audit_value = existing_files.get("audit")
+            if audit_value and Path(audit_value).exists():
+                audit_checkpoint = (
+                    project_dir
+                    / "audits"
+                    / state["run_id"]
+                    / f"round_{round_index}_before_retry_{retry_count}.csv"
+                )
+                audit_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                copy2(audit_value, audit_checkpoint)
+                existing_files["audit_checkpoint"] = str(audit_checkpoint)
+            round_state["checkpoint_files"] = dict(existing_files)
+            retained_files = {
+                key: value
+                for key, value in existing_files.items()
+                if key in {"snowballed", "seeds", "audit_checkpoint"}
+            }
+            round_state.update(
+                {
+                    "status": "running",
+                    "files": retained_files,
+                    "error": "",
+                }
+            )
+            round_state.setdefault("counts", {}).update(
+                {
+                    "seeds": len(seed_result.seeds),
+                    "retry_count": retry_count,
+                }
+            )
+        else:
+            round_index = pending_round_index
+            round_state = _new_round_state(index=round_index, kind="snowball")
+            round_state["counts"]["seeds"] = len(seed_result.seeds)
+            state["rounds"].append(round_state)
+        round_state["snowball_mode"] = "targeted" if targeted_snowball else "incremental"
+        round_state["replay_initial_exclusions"] = bool(replay_initial_exclusions)
+        if normalized_target_seed:
+            round_state["target_seed"] = dict(normalized_target_seed)
+            round_state["counts"]["target_seed_title"] = normalized_target_seed["title"]
         state["status"] = "running_snowball"
         state.setdefault("options", {}).update(
             {
@@ -1348,36 +1530,48 @@ class PipelineService:
                 ),
                 "snowball_backward_limit": max(max_backward_per_seed, 0),
                 "snowball_forward_limit": max(max_forward_per_seed, 0),
+                "snowball_enrich_limit": enrich_limit,
+                "snowball_core_online": core_online,
+                "snowball_citation_providers": selected_providers,
+                "snowball_provider_strategy": selected_strategy,
+                "snowball_mode": "targeted" if targeted_snowball else "incremental",
             }
         )
         self._save_state(project_slug, state)
 
-        config = load_config(self.store.config_path(project_slug))
         run_dir = project_dir / "runs" / state["run_id"]
         processed_dir = run_dir / "processed"
-        previous_pool = Path(latest_round["files"]["pool"])
+        previous_pool = Path(latest_round["files"].get("pool") or latest_round["files"]["audit"])
+        snowball_input = previous_pool
+        checkpoint_value = round_state.get("files", {}).get("snowballed")
+        if retry_round is not None and checkpoint_value and Path(checkpoint_value).exists():
+            snowball_input = Path(checkpoint_value)
         tracked_progress = self._begin_progress(
             project_slug,
             state,
             operation="Citation snowballing",
             heading="Running citation snowballing",
-            stages=_with_prompt_replay_stage(
-                _with_title_screening_stage(SNOWBALL_STAGES, use_title_llm),
-                replay_initial_exclusions,
-            ),
+            stages=_with_title_screening_stage(SNOWBALL_STAGES, use_title_llm),
             callback=progress,
-            paper_count=_csv_row_count(previous_pool),
+            paper_count=_csv_row_count(snowball_input),
         )
+        snowball_path = processed_dir / f"candidate_papers_snowballed_round_{round_index}.csv"
 
         try:
             _notify(
                 tracked_progress,
                 "Citation snowballing",
-                "Collecting references and citing works from OpenAlex.",
+                "Collecting references and citing works from the selected providers.",
             )
-            snowball_path = processed_dir / f"candidate_papers_snowballed_round_{round_index}.csv"
+            round_state.setdefault("files", {}).update(
+                {
+                    "snowballed": str(snowball_path),
+                    "seeds": str(seed_path),
+                }
+            )
+            self._save_state(project_slug, state)
             snowball_result = snowball_candidates(
-                previous_pool,
+                snowball_input,
                 snowball_path,
                 config,
                 seed_papers_path=seed_path,
@@ -1388,29 +1582,51 @@ class PipelineService:
                     tracked_progress,
                     state,
                     "Citation snowballing",
-                    "Collecting references and citing works from OpenAlex.",
+                    "Collecting references and citing works from the selected providers.",
                 ),
+            )
+            snowball_result = _merge_retry_provider_summary(
+                snowball_result,
+                retry_round=retry_round,
+                selected_providers=selected_providers,
+            )
+            new_candidates_path = (
+                processed_dir / f"candidate_papers_snowball_new_round_{round_index}.csv"
+            )
+            round_added_rows = _write_incremental_snowball_candidates(
+                snowball_path,
+                new_candidates_path,
+                prior_paths=[previous_pool, *audit_paths],
             )
             write_snowballing_summary(
                 snowball_result.summary,
                 processed_dir / f"snowballing_round_{round_index}_summary.json",
             )
+            coverage_path = processed_dir / f"snowball_seed_coverage_round_{round_index}.csv"
+            write_seed_coverage_report(snowball_result.summary, coverage_path)
+            coverage_by_status = Counter(
+                str(item.get("coverage_status") or "failed")
+                for item in snowball_result.summary.seed_diagnostics
+            )
+            coverage_issue_seeds = coverage_by_status.get("partial", 0) + coverage_by_status.get(
+                "failed", 0
+            )
             round_state["files"]["snowballed"] = str(snowball_path)
+            round_state["files"]["snowball_new"] = str(new_candidates_path)
             round_state["files"]["seeds"] = str(seed_path)
+            round_state["files"]["seed_coverage"] = str(coverage_path)
             record_flow_stage(
                 round_state,
                 key="citation_snowballing",
                 label="Citation snowballing",
-                input_count=snowball_result.summary.input_unique_rows,
-                retained_count=snowball_result.summary.output_rows,
+                input_count=len(seed_result.seeds),
+                retained_count=round_added_rows,
                 excluded_count=0,
                 stage_type="discovery",
                 details={
-                    "new papers": snowball_result.summary.added_rows,
+                    "new papers": round_added_rows,
                     "resolved seeds": snowball_result.summary.seeds_resolved,
-                    "references available": (
-                        snowball_result.summary.references_available
-                    ),
+                    "references available": (snowball_result.summary.references_available),
                     "references fetched": snowball_result.summary.references_fetched,
                     "citations available": snowball_result.summary.citations_available,
                     "citations fetched": snowball_result.summary.citations_fetched,
@@ -1418,6 +1634,13 @@ class PipelineService:
                         snowball_result.summary.backward_truncated_seeds
                         + snowball_result.summary.forward_truncated_seeds
                     ),
+                    "provider strategy": snowball_result.summary.provider_strategy,
+                    "providers": list(snowball_result.summary.provider_order),
+                    "provider successes": dict(snowball_result.summary.provider_successes),
+                    "provider failures": dict(snowball_result.summary.provider_failures),
+                    "complete seed coverage": coverage_by_status.get("complete", 0),
+                    "partial seed coverage": coverage_by_status.get("partial", 0),
+                    "failed seed coverage": coverage_by_status.get("failed", 0),
                 },
             )
             self._save_state(project_slug, state)
@@ -1428,7 +1651,11 @@ class PipelineService:
                 "Applying project exclusion terms to new records.",
             )
             screened_path = processed_dir / f"candidate_papers_screened_round_{round_index}.csv"
-            screening_result = screen_candidates(snowball_path, screened_path, config.screening)
+            screening_result = screen_candidates(
+                new_candidates_path,
+                screened_path,
+                config.screening,
+            )
             rule_excluded = screening_result.summary.by_decision.get("exclude", 0)
             rule_retained = screening_result.summary.total - rule_excluded
             round_state["files"]["screened"] = str(screened_path)
@@ -1451,10 +1678,9 @@ class PipelineService:
             )
             round_state["counts"].update(
                 {
-                    "pool_rows": snowball_result.summary.output_rows,
-                    "rule_excluded": screening_result.summary.by_decision.get(
-                        "exclude", 0
-                    ),
+                    "pool_rows": round_added_rows,
+                    "historical_pool_rows": snowball_result.summary.output_rows,
+                    "rule_excluded": screening_result.summary.by_decision.get("exclude", 0),
                     **_title_screening_counts(title_result),
                 }
             )
@@ -1504,9 +1730,7 @@ class PipelineService:
                 else rule_retained
             )
             round_state["files"]["venues"] = str(venue_path)
-            round_state["files"]["publication_resolution"] = str(
-                publication_resolution_path
-            )
+            round_state["files"]["publication_resolution"] = str(publication_resolution_path)
             record_flow_stage(
                 round_state,
                 key="venue_enrichment",
@@ -1587,68 +1811,41 @@ class PipelineService:
                 },
             )
 
-            replay_files: dict[str, str] = {}
-            replay_counts: dict[str, int] = {}
-            if replay_initial_exclusions:
-                _notify(
-                    tracked_progress,
-                    "Re-screen initial AI exclusions",
-                    "Applying the approved prompt to initial AI exclusions.",
-                )
-                replay_files, replay_counts = self._replay_initial_ai_exclusions(
-                    project_slug=project_slug,
-                    state=state,
-                    round_index=round_index,
-                    enriched_path=enriched_path,
-                    config=config,
-                    processed_dir=processed_dir,
-                    progress=tracked_progress,
-                )
-                record_flow_stage(
-                    round_state,
-                    key="prompt_replay",
-                    label="Re-screen initial AI exclusions",
-                    input_count=replay_counts["replayed"],
-                    retained_count=replay_counts["recovered"],
-                    excluded_count=replay_counts["reexcluded"],
-                    details={"failed": replay_counts["failed"]},
-                )
-
             round_state["status"] = "discovery_complete"
+            audit_checkpoint = round_state.get("files", {}).get("audit_checkpoint")
             round_state["files"] = {
                 "snowballed": str(snowball_path),
+                "snowball_new": str(new_candidates_path),
+                "seed_coverage": str(coverage_path),
                 "screened": str(screened_path),
-                **(
-                    {"title_screened": str(title_input)}
-                    if title_result is not None
-                    else {}
-                ),
+                **({"title_screened": str(title_input)} if title_result is not None else {}),
                 "venues": str(venue_path),
                 "publication_resolution": str(publication_resolution_path),
                 "enriched": str(enriched_path),
                 "seeds": str(seed_path),
-                **replay_files,
+                **({"audit_checkpoint": audit_checkpoint} if audit_checkpoint else {}),
             }
             round_state["counts"].update(
                 {
-                    "pool_rows": snowball_result.summary.output_rows,
-                    "added_rows": snowball_result.summary.added_rows,
+                    "pool_rows": round_added_rows,
+                    "historical_pool_rows": snowball_result.summary.output_rows,
+                    "added_rows": round_added_rows,
                     "resolved_seeds": snowball_result.summary.seeds_resolved,
-                    "references_available": (
-                        snowball_result.summary.references_available
-                    ),
+                    "references_available": (snowball_result.summary.references_available),
                     "references_fetched": snowball_result.summary.references_fetched,
                     "citations_available": snowball_result.summary.citations_available,
                     "citations_fetched": snowball_result.summary.citations_fetched,
-                    "backward_truncated_seeds": (
-                        snowball_result.summary.backward_truncated_seeds
-                    ),
-                    "forward_truncated_seeds": (
-                        snowball_result.summary.forward_truncated_seeds
-                    ),
-                    "rule_excluded": screening_result.summary.by_decision.get(
-                        "exclude", 0
-                    ),
+                    "backward_truncated_seeds": (snowball_result.summary.backward_truncated_seeds),
+                    "forward_truncated_seeds": (snowball_result.summary.forward_truncated_seeds),
+                    "citation_providers": list(snowball_result.summary.provider_order),
+                    "provider_strategy": snowball_result.summary.provider_strategy,
+                    "provider_successes": dict(snowball_result.summary.provider_successes),
+                    "provider_failures": dict(snowball_result.summary.provider_failures),
+                    "coverage_complete_seeds": coverage_by_status.get("complete", 0),
+                    "coverage_partial_seeds": coverage_by_status.get("partial", 0),
+                    "coverage_failed_seeds": coverage_by_status.get("failed", 0),
+                    "coverage_issue_seeds": coverage_issue_seeds,
+                    "rule_excluded": screening_result.summary.by_decision.get("exclude", 0),
                     **_title_screening_counts(title_result),
                     "publication_resolution_attempted": getattr(
                         venue_result.summary,
@@ -1669,7 +1866,6 @@ class PipelineService:
                         0,
                     ),
                     "abstract_cache_hits": enrichment_result.summary.cache_hits,
-                    **replay_counts,
                 }
             )
             state["status"] = "awaiting_ai_or_review"
@@ -1679,14 +1875,21 @@ class PipelineService:
                 state,
                 progress,
                 stage="Snowball discovery complete",
-                message="New records are ready for AI screening or review.",
+                message=(
+                    f"Candidates are ready for review preparation; {coverage_issue_seeds} "
+                    "seed papers have citation coverage warnings."
+                    if coverage_issue_seeds
+                    else "New records are ready for AI screening or review."
+                ),
                 paper_count=_csv_row_count(enriched_path),
             )
             return state
         except TaskCancelled:
+            _ensure_checkpoint_file(snowball_input, snowball_path)
             self._mark_cancelled(project_slug, state, round_state)
             return state
         except Exception as exc:
+            _ensure_checkpoint_file(snowball_input, snowball_path)
             self._mark_failed(project_slug, state, round_state, exc)
             raise
 
@@ -1702,36 +1905,45 @@ class PipelineService:
         progress: ProgressCallback | None,
     ) -> tuple[dict[str, str], dict[str, int]]:
         refinement = state.get("prompt_refinement", {})
-        approved_value = refinement.get("approved_prompt_path")
+        replay = _ensure_prompt_replay_state(state)
+        approved_value = replay.get("approved_prompt_path") or refinement.get(
+            "approved_prompt_path"
+        )
         if not approved_value or not Path(approved_value).exists():
             raise RuntimeError("The approved screening prompt file is unavailable.")
-        initial_exclusions = _initial_ai_exclusion_rows(state)
+        initial_exclusions, filter_counts = _initial_ai_exclusion_summary(state)
         if not initial_exclusions:
-            refinement.update(
-                {
-                    "replay_status": "completed",
-                    "replay_round": round_index,
-                    "replayed_at": _now(),
-                    "replayed": 0,
-                    "recovered": 0,
-                    "reexcluded": 0,
-                    "failed": 0,
-                }
-            )
-            return {}, {
+            counts = {
                 "replayed": 0,
                 "recovered": 0,
                 "reexcluded": 0,
                 "failed": 0,
+                "replay_source_exclusions": filter_counts["deduplicated_exclusions"],
+                "replay_reviewed_removed": filter_counts["reviewed_removed"],
+                "replay_eligible": filter_counts["eligible"],
             }
+            replay.update(
+                {
+                    "status": "completed",
+                    "replay_round": round_index,
+                    "replayed_at": _now(),
+                    **counts,
+                }
+            )
+            refinement.update({"replay_status": "completed", **counts})
+            return {}, counts
 
         fieldnames, current_rows = read_csv(enriched_path)
-        current_by_key = {paper_key(row): row for row in current_rows}
-        replay_input_rows = [
-            dict(current_by_key.get(paper_key(row), row))
-            for row in initial_exclusions
-        ]
-        revision_id = str(refinement.get("refinement_id") or "approved")
+        current_indexes = _row_alias_indexes(current_rows)
+        replay_input_rows: list[dict[str, str]] = []
+        for row in initial_exclusions:
+            match_index = _matching_row_index(current_indexes, row)
+            replay_input_rows.append(
+                dict(current_rows[match_index] if match_index is not None else row)
+            )
+        revision_id = str(
+            replay.get("refinement_id") or refinement.get("refinement_id") or "approved"
+        )
         prefix = f"prompt_replay_round_{round_index}"
         input_path = processed_dir / f"{prefix}_input.csv"
         screened_path = processed_dir / f"{prefix}_screened.csv"
@@ -1739,19 +1951,15 @@ class PipelineService:
         report_path = processed_dir / f"{prefix}_report.md"
         final_summary_path = processed_dir / f"{prefix}_summary.json"
         request_summary_path = processed_dir / f"{prefix}_request_summary.json"
-        input_fields = list(
-            dict.fromkeys(key for row in replay_input_rows for key in row)
-        )
+        input_fields = list(dict.fromkeys(key for row in replay_input_rows for key in row))
         write_audit_csv(input_path, replay_input_rows, input_fields)
         replay_config = replace(
             config.llm_screening,
+            model=self.store.load_project(project_slug).prompt_replay_model,
             system_prompt_path=Path(approved_value),
             prompt_version=f"prompt-refinement-{revision_id}",
         )
-        decisions = {
-            str(row.get("auto_screening_decision") or "")
-            for row in replay_input_rows
-        }
+        decisions = {str(row.get("auto_screening_decision") or "") for row in replay_input_rows}
         llm_result = llm_screen_candidates(
             input_path,
             screened_path,
@@ -1775,9 +1983,7 @@ class PipelineService:
         recovered = 0
         reexcluded = 0
         failed = 0
-        current_indexes = {
-            paper_key(row): index for index, row in enumerate(current_rows)
-        }
+        current_indexes = _row_alias_indexes(current_rows)
         for row in recommendation_result.rows:
             is_failed = row.get("llm_status") == "failed"
             is_reexcluded = row.get("llm_decision") == "exclude" and not is_failed
@@ -1787,16 +1993,12 @@ class PipelineService:
                     {
                         "final_recommendation": "auto_exclude",
                         "final_priority": "8",
-                        "final_reason": (
-                            "The approved refined prompt excluded this paper again."
-                        ),
+                        "final_reason": ("The approved refined prompt excluded this paper again."),
                     }
                 )
             row.update(
                 {
-                    "auto_screening_decision": (
-                        "exclude" if is_reexcluded else "needs_review"
-                    ),
+                    "auto_screening_decision": ("exclude" if is_reexcluded else "needs_review"),
                     "prompt_replay_decision": replay_decision,
                     "prompt_refinement_id": revision_id,
                 }
@@ -1804,20 +2006,20 @@ class PipelineService:
             failed += int(is_failed)
             reexcluded += int(is_reexcluded)
             recovered += int(not is_reexcluded)
-            key = paper_key(row)
-            match_index = current_indexes.get(key)
+            match_index = _matching_row_index(current_indexes, row)
             if match_index is None:
                 if is_reexcluded:
                     continue
-                current_indexes[key] = len(current_rows)
                 current_rows.append(dict(row))
+                for key in paper_keys(row):
+                    current_indexes[key] = len(current_rows) - 1
                 continue
             current_rows[match_index].update(row)
+            for key in paper_keys(current_rows[match_index]):
+                current_indexes[key] = match_index
 
         output_fields = list(
-            dict.fromkeys(
-                [*fieldnames, *(key for row in current_rows for key in row)]
-            )
+            dict.fromkeys([*fieldnames, *(key for row in current_rows for key in row)])
         )
         write_audit_csv(enriched_path, current_rows, output_fields)
         counts = {
@@ -1825,6 +2027,9 @@ class PipelineService:
             "recovered": recovered,
             "reexcluded": reexcluded,
             "failed": failed,
+            "replay_source_exclusions": filter_counts["deduplicated_exclusions"],
+            "replay_reviewed_removed": filter_counts["reviewed_removed"],
+            "replay_eligible": filter_counts["eligible"],
         }
         files = {
             "prompt_replay_input": str(input_path),
@@ -1832,15 +2037,16 @@ class PipelineService:
             "prompt_replay_recommendations": str(recommendations_path),
             "prompt_replay_report": str(report_path),
         }
-        refinement.update(
+        replay.update(
             {
-                "replay_status": "completed",
+                "status": "completed",
                 "replay_round": round_index,
                 "replayed_at": _now(),
                 **counts,
                 "replay_files": files,
             }
         )
+        refinement.update({"replay_status": "completed", **counts})
         return files, counts
 
     def _title_prescreen(
@@ -1856,9 +2062,7 @@ class PipelineService:
         if not enabled:
             return input_path, None
         settings = self.store.load_project(project_slug)
-        api_key = self.store.read_api_key(project_slug) or os.environ.get(
-            "OPENAI_API_KEY", ""
-        )
+        api_key = self.store.read_api_key(project_slug) or os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             raise RuntimeError("Save or provide an OpenAI API key before AI title screening.")
         _notify(
@@ -1869,7 +2073,7 @@ class PipelineService:
         client = OpenAIResearchClient(
             base_url=settings.llm_base_url,
             api_key=api_key,
-            model=settings.llm_model,
+            model=settings.title_screening_model,
             timeout_seconds=30,
             retries=3,
         )
@@ -1881,7 +2085,7 @@ class PipelineService:
             scope_description=settings.scope_description,
             inclusion_criteria=settings.inclusion_criteria,
             exclusion_criteria=settings.exclusion_criteria,
-            model=settings.llm_model,
+            model=settings.title_screening_model,
             cache_dir=self.store.project_dir(project_slug) / "cache" / "title_screening",
             batch_size=batch_size,
             progress_callback=_item_progress(
@@ -1896,7 +2100,13 @@ class PipelineService:
         )
         return output_path, result
 
-    def estimate_llm_usage(self, project_slug: str, round_index: int) -> dict[str, int]:
+    def estimate_llm_usage(
+        self,
+        project_slug: str,
+        round_index: int,
+        *,
+        llm_limit: int | None = None,
+    ) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
         round_state = _get_round(state, round_index)
         path = Path(round_state["files"]["enriched"])
@@ -1907,17 +2117,91 @@ class PipelineService:
             if row.get("auto_screening_decision") in {"include_candidate", "needs_review"}
             and not row.get("llm_decision")
         ]
+        if llm_limit is not None:
+            eligible = eligible[: max(int(llm_limit), 0)]
         prompt_chars = len(self.store.system_prompt_path(project_slug).read_text(encoding="utf-8"))
-        input_chars = sum(
-            prompt_chars + len(row.get("title", "")) + len((row.get("abstract") or "")[:5000])
-            for row in eligible
-        )
         config = load_config(self.store.config_path(project_slug))
+        batch_size = max(config.llm_screening.batch_size, 1)
+        estimated_requests = math.ceil(len(eligible) / batch_size)
+        input_chars = prompt_chars * estimated_requests + sum(
+            len(row.get("title", "")) + len((row.get("abstract") or "")[:5000]) for row in eligible
+        )
+        estimated_input_tokens = math.ceil(input_chars * 1.15 / 4)
+        maximum_output_tokens = sum(
+            min(
+                max(config.llm_screening.max_output_tokens, batch_papers * 600),
+                32000,
+            )
+            for batch_papers in _batch_sizes(len(eligible), batch_size)
+        )
+        estimated_output_tokens = min(
+            len(eligible) * output_tokens_per_paper(),
+            maximum_output_tokens,
+        )
+        settings = self.store.load_project(project_slug)
+        price = get_model_price(
+            settings.llm_model,
+            cache_path=self._model_price_cache_path(project_slug),
+        )
+        estimated_cost = (
+            estimate_token_cost(
+                input_tokens=estimated_input_tokens,
+                output_tokens=estimated_output_tokens,
+                price=price,
+            )
+            if price
+            else None
+        )
+        maximum_cost = (
+            estimate_token_cost(
+                input_tokens=estimated_input_tokens,
+                output_tokens=maximum_output_tokens,
+                price=price,
+            )
+            if price
+            else None
+        )
         return {
             "papers": len(eligible),
-            "estimated_input_tokens": math.ceil(input_chars / 4),
-            "maximum_output_tokens": len(eligible) * config.llm_screening.max_output_tokens,
+            "model": settings.llm_model,
+            "estimated_input_tokens": estimated_input_tokens,
+            "estimated_output_tokens": estimated_output_tokens,
+            "maximum_output_tokens": maximum_output_tokens,
+            "batch_size": batch_size,
+            "estimated_requests": estimated_requests,
+            "estimated_cost_usd": estimated_cost,
+            "maximum_cost_usd": maximum_cost,
+            "price": (
+                {
+                    "input_per_million": price.input_per_million,
+                    "output_per_million": price.output_per_million,
+                    "source": price.source,
+                    "source_url": price.source_url,
+                    "updated_at": price.updated_at,
+                }
+                if price
+                else None
+            ),
         }
+
+    def refresh_llm_model_price(self, project_slug: str):
+        settings = self.store.load_project(project_slug)
+        if not is_openai_api_base_url(settings.llm_base_url):
+            raise RuntimeError(
+                "Live price refresh is available only for the official OpenAI API. "
+                "Add custom-provider prices to configs/model_pricing.yaml."
+            )
+        return refresh_openai_model_price(
+            settings.llm_model,
+            cache_path=self._model_price_cache_path(project_slug),
+        )
+
+    def prompt_replay_pending_for_round(self, project_slug: str, round_index: int) -> bool:
+        state = self.load_current_state(project_slug)
+        return _round_prompt_replay_requested(state, _get_round(state, round_index))
+
+    def _model_price_cache_path(self, project_slug: str) -> Path:
+        return self.store.project_dir(project_slug) / "cache" / "model_pricing.json"
 
     def update_audit(
         self,
@@ -1933,31 +2217,83 @@ class PipelineService:
         self._save_state(project_slug, state)
         return summary
 
+    def reconcile_snowball_audit(self, project_slug: str, round_index: int) -> int:
+        state = self.load_current_state(project_slug)
+        round_state = _get_round(state, round_index)
+        audit_value = round_state.get("files", {}).get("audit")
+        if round_state.get("kind") != "snowball" or not audit_value:
+            return 0
+
+        seen: set[str] = set()
+        for item in state.get("rounds", []):
+            if int(item.get("index", -1)) >= round_index:
+                continue
+            previous_audit = item.get("files", {}).get("audit")
+            if not previous_audit or not Path(previous_audit).exists():
+                continue
+            _, previous_rows = read_csv(Path(previous_audit))
+            for row in previous_rows:
+                seen.update(paper_keys(row))
+
+        audit_path = Path(audit_value)
+        fieldnames, rows = read_csv(audit_path)
+        emitted: set[str] = set()
+        kept_rows: list[dict[str, str]] = []
+        for row in rows:
+            keys = paper_keys(row)
+            if keys & seen or keys & emitted:
+                continue
+            kept_rows.append(row)
+            emitted.update(keys)
+        removed = len(rows) - len(kept_rows)
+        if not removed:
+            return 0
+
+        backup_path = audit_path.with_name(f"{audit_path.stem}_before_duplicate_cleanup.csv")
+        if not backup_path.exists():
+            copy2(audit_path, backup_path)
+        write_audit_csv(audit_path, kept_rows, fieldnames)
+        summary = summarize_audit(kept_rows)
+        round_state["files"]["audit_pre_cleanup"] = str(backup_path)
+        round_state.setdefault("counts", {})["audit_duplicates_removed"] = removed
+        round_state["counts"]["audit_queue"] = summary.total
+        _apply_audit_summary(round_state, summary)
+        if round_state is state["rounds"][-1]:
+            round_state["status"] = (
+                "converged"
+                if summary.total == 0 and _failed_seed_coverage_count(round_state) == 0
+                else "ready_for_review"
+            )
+            state["status"] = (
+                "converged" if round_state["status"] == "converged" else "awaiting_manual_review"
+            )
+        _invalidate_derived_outputs(state)
+        self._save_state(project_slug, state)
+        return removed
+
     def prompt_refinement_overview(self, project_slug: str) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
-        initial_round = next(
-            (
-                item
-                for item in state.get("rounds", [])
-                if int(item.get("index", -1)) == 0
-                and item.get("files", {}).get("audit")
-            ),
-            None,
-        )
-        if initial_round is None:
+        audit_paths = _audit_paths(state)
+        _, audit_rows = _cumulative_audit_rows(state, reviewed_only=False)
+        summary = summarize_audit(audit_rows)
+        _, replay_counts = _initial_ai_exclusion_summary(state)
+        if not audit_paths:
             return {
                 "available": False,
                 "audit_total": 0,
                 "unreviewed": 0,
                 "initial_ai_exclusions": 0,
+                "reviewed_removed_before_replay": 0,
+                "audit_rounds": 0,
                 "refinement": state.get("prompt_refinement", {}),
             }
-        _, _, summary = load_audit(Path(initial_round["files"]["audit"]))
         return {
             "available": True,
             "audit_total": summary.total,
             "unreviewed": summary.unreviewed,
-            "initial_ai_exclusions": len(_initial_ai_exclusion_rows(state)),
+            "initial_ai_exclusions": replay_counts["eligible"],
+            "reviewed_removed_before_replay": replay_counts["reviewed_removed"],
+            "audit_rounds": len(audit_paths),
             "refinement": state.get("prompt_refinement", {}),
         }
 
@@ -1968,31 +2304,21 @@ class PipelineService:
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
-        initial_round = next(
-            (
-                item
-                for item in state.get("rounds", [])
-                if int(item.get("index", -1)) == 0
-                and item.get("files", {}).get("audit")
-            ),
-            None,
-        )
-        if initial_round is None:
-            raise RuntimeError("Complete the initial manual review before refining the prompt.")
-        audit_path = Path(initial_round["files"]["audit"])
-        _, audit_rows, audit_summary = load_audit(audit_path)
+        audit_paths = _audit_paths(state)
+        if not audit_paths:
+            raise RuntimeError("Complete a manual review round before refining the prompt.")
+        audit_fields, audit_rows = _cumulative_audit_rows(state, reviewed_only=False)
+        audit_summary = summarize_audit(audit_rows)
         if audit_summary.unreviewed:
             raise RuntimeError(
-                "Finish every paper in the initial audit before refining the prompt."
+                "Finish every paper in the current audit history before refining the prompt."
             )
         settings = self.store.load_project(project_slug)
-        api_key = self.store.read_api_key(project_slug) or os.environ.get(
-            "OPENAI_API_KEY", ""
-        )
+        api_key = self.store.read_api_key(project_slug) or os.environ.get("OPENAI_API_KEY", "")
         client = OpenAIResearchClient(
             base_url=settings.llm_base_url,
             api_key=api_key,
-            model=settings.llm_model,
+            model=settings.prompt_refinement_model,
         )
         prompt_path = self.store.system_prompt_path(project_slug)
         old_prompt = prompt_path.read_text(encoding="utf-8")
@@ -2004,11 +2330,14 @@ class PipelineService:
             / "refinements"
             / refinement_id
         )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = output_dir / "reviewed_papers.csv"
+        write_audit_csv(audit_path, audit_rows, audit_fields)
         tracked_progress = self._begin_progress(
             project_slug,
             state,
             operation="Prompt refinement",
-            heading="Learning from the initial manual audit",
+            heading="Learning from cumulative manual audits",
             stages=PROMPT_REFINEMENT_STAGES,
             callback=progress,
             paper_count=len(audit_rows),
@@ -2018,7 +2347,7 @@ class PipelineService:
             _notify(
                 tracked_progress,
                 "Learning from manual audit",
-                "Comparing AI recommendations with the completed human decisions.",
+                "Comparing AI recommendations with all completed human decisions and notes.",
                 len(audit_rows),
                 len(audit_rows),
             )
@@ -2037,14 +2366,34 @@ class PipelineService:
                 "Prompt proposal",
                 "Saving the proposed prompt for human approval.",
             )
+            previous_refinement = state.get("prompt_refinement")
+            if isinstance(previous_refinement, dict) and previous_refinement.get("refinement_id"):
+                history = state.setdefault("prompt_refinement_history", [])
+                if not any(
+                    item.get("refinement_id") == previous_refinement.get("refinement_id")
+                    for item in history
+                    if isinstance(item, dict)
+                ):
+                    history.append(dict(previous_refinement))
+            replay_state = _ensure_prompt_replay_state(state)
             state["prompt_refinement"] = {
                 "refinement_id": refinement_id,
                 "status": "proposed",
-                "source_round": 0,
-                "model": settings.llm_model,
+                "source_round": max(
+                    int(item.get("index", 0))
+                    for item in state.get("rounds", [])
+                    if item.get("files", {}).get("audit")
+                ),
+                "source_rounds": [
+                    int(item.get("index", 0))
+                    for item in state.get("rounds", [])
+                    if item.get("files", {}).get("audit")
+                ],
+                "model": settings.prompt_refinement_model,
                 "generated_at": _now(),
                 "audit_path": str(audit_path),
-                "audit_sha256": _file_sha256(audit_path),
+                "audit_sources": [str(path) for path in audit_paths],
+                "audit_sha256": _audit_fingerprint(audit_paths),
                 "baseline_prompt_sha256": _text_sha256(old_prompt.strip()),
                 "rows_total": result.rows_total,
                 "rows_used": result.rows_used,
@@ -2052,8 +2401,9 @@ class PipelineService:
                 "baseline_prompt_path": str(result.baseline_prompt_path),
                 "proposed_prompt_path": str(result.proposed_prompt_path),
                 "feedback_path": str(result.feedback_path),
+                "feedback_csv_path": str(audit_path),
                 "change_summary": result.change_summary,
-                "replay_status": "not_approved",
+                "replay_status": replay_state.get("status", "not_available"),
             }
             self._save_state(project_slug, state)
             self._complete_progress(
@@ -2088,18 +2438,28 @@ class PipelineService:
         refinement = state.get("prompt_refinement", {})
         if refinement.get("status") != "proposed":
             raise RuntimeError("No pending prompt proposal is available for approval.")
-        audit_path = Path(refinement["audit_path"])
-        if _file_sha256(audit_path) != refinement.get("audit_sha256"):
+        source_values = refinement.get("audit_sources")
+        if isinstance(source_values, list):
+            source_paths = [Path(value) for value in source_values]
+            current_paths = _audit_paths(state)
+            audit_changed = (
+                [str(path.resolve()) for path in source_paths]
+                != [str(path.resolve()) for path in current_paths]
+                or any(not path.exists() for path in source_paths)
+                or _audit_fingerprint(source_paths) != refinement.get("audit_sha256")
+            )
+        else:
+            audit_path = Path(refinement["audit_path"])
+            audit_changed = not audit_path.exists() or _file_sha256(audit_path) != refinement.get(
+                "audit_sha256"
+            )
+        if audit_changed:
             raise RuntimeError(
-                "The initial audit changed after this proposal was generated. "
+                "The audited feedback changed after this proposal was generated. "
                 "Generate a new proposal."
             )
-        current_prompt = self.store.system_prompt_path(project_slug).read_text(
-            encoding="utf-8"
-        )
-        if _text_sha256(current_prompt.strip()) != refinement.get(
-            "baseline_prompt_sha256"
-        ):
+        current_prompt = self.store.system_prompt_path(project_slug).read_text(encoding="utf-8")
+        if _text_sha256(current_prompt.strip()) != refinement.get("baseline_prompt_sha256"):
             raise RuntimeError(
                 "The screening prompt changed after this proposal was generated. "
                 "Generate a new proposal."
@@ -2107,18 +2467,26 @@ class PipelineService:
         approved_prompt = proposed_prompt.strip()
         if not approved_prompt:
             raise ValueError("The system prompt cannot be empty.")
-        approved_path = Path(refinement["proposal_path"]).with_name(
-            "approved_prompt.txt"
-        )
+        approved_path = Path(refinement["proposal_path"]).with_name("approved_prompt.txt")
         approved_path.write_text(approved_prompt + "\n", encoding="utf-8")
         self.store.save_system_prompt(project_slug, approved_prompt)
+        replay = _ensure_prompt_replay_state(state)
+        if replay.get("status") not in {"pending", "completed"}:
+            replay.update(
+                {
+                    "status": "pending",
+                    "refinement_id": refinement.get("refinement_id", ""),
+                    "approved_prompt_path": str(approved_path),
+                    "approved_at": _now(),
+                }
+            )
         refinement.update(
             {
                 "status": "approved",
                 "approved_at": _now(),
                 "approved_prompt_path": str(approved_path),
                 "approved_prompt_sha256": _text_sha256(approved_prompt),
-                "replay_status": "pending",
+                "replay_status": replay.get("status", "not_available"),
             }
         )
         self._save_state(project_slug, state)
@@ -2129,11 +2497,12 @@ class PipelineService:
         refinement = state.get("prompt_refinement", {})
         if refinement.get("status") != "proposed":
             raise RuntimeError("No pending prompt proposal is available for rejection.")
+        replay = _ensure_prompt_replay_state(state)
         refinement.update(
             {
                 "status": "rejected",
                 "rejected_at": _now(),
-                "replay_status": "not_approved",
+                "replay_status": replay.get("status", "not_available"),
             }
         )
         self._save_state(project_slug, state)
@@ -2142,13 +2511,17 @@ class PipelineService:
     def prompt_replay_overview(self, project_slug: str) -> dict[str, Any]:
         state = self.load_current_state(project_slug)
         refinement = state.get("prompt_refinement", {})
-        exclusions = _initial_ai_exclusion_rows(state)
+        replay = _ensure_prompt_replay_state(state)
+        _, filter_counts = _initial_ai_exclusion_summary(state)
         return {
-            "approved": refinement.get("status") == "approved",
-            "refinement_id": refinement.get("refinement_id", ""),
-            "replay_status": refinement.get("replay_status", "not_available"),
-            "eligible": len(exclusions),
-            "replay_round": refinement.get("replay_round"),
+            "approved": replay.get("status") in {"pending", "completed"},
+            "refinement_id": replay.get("refinement_id", ""),
+            "replay_status": replay.get("status", "not_available"),
+            "source_exclusions": filter_counts["deduplicated_exclusions"],
+            "reviewed_removed": filter_counts["reviewed_removed"],
+            "eligible": filter_counts["eligible"],
+            "replay_round": replay.get("replay_round"),
+            "latest_refinement_id": refinement.get("refinement_id", ""),
         }
 
     def add_manual_paper(
@@ -2227,8 +2600,7 @@ class PipelineService:
             "saved": len(manual_records),
             "pending": len(targets),
             "enriched": sum(
-                _is_direct_manual_audit_row(row)
-                and _manual_enrichment_completed(row)
+                _is_direct_manual_audit_row(row) and _manual_enrichment_completed(row)
                 for row in target_rows
             ),
         }
@@ -2258,9 +2630,7 @@ class PipelineService:
         )
         if not targets:
             raise RuntimeError("No manually added papers are waiting for enrichment.")
-        if not self.store.has_api_key(project_slug) and not os.environ.get(
-            "OPENAI_API_KEY"
-        ):
+        if not self.store.has_api_key(project_slug) and not os.environ.get("OPENAI_API_KEY"):
             raise RuntimeError(
                 "Save or provide an OpenAI API key before screening manual additions."
             )
@@ -2416,8 +2786,7 @@ class PipelineService:
             enriched_manual_rows = [
                 row
                 for row in audit_rows
-                if _is_direct_manual_audit_row(row)
-                and _manual_enrichment_completed(row)
+                if _is_direct_manual_audit_row(row) and _manual_enrichment_completed(row)
             ]
             target_round["counts"].update(
                 {
@@ -2427,10 +2796,7 @@ class PipelineService:
                     "manual_enriched": len(enriched_manual_rows),
                     "manual_review_additions": len(enriched_manual_rows),
                     "manual_publication_resolution_attempted": int(
-                        target_round["counts"].get(
-                            "manual_publication_resolution_attempted"
-                        )
-                        or 0
+                        target_round["counts"].get("manual_publication_resolution_attempted") or 0
                     )
                     + getattr(
                         venue_result.summary,
@@ -2438,10 +2804,7 @@ class PipelineService:
                         0,
                     ),
                     "manual_published_versions_resolved": int(
-                        target_round["counts"].get(
-                            "manual_published_versions_resolved"
-                        )
-                        or 0
+                        target_round["counts"].get("manual_published_versions_resolved") or 0
                     )
                     + getattr(
                         venue_result.summary,
@@ -2449,20 +2812,17 @@ class PipelineService:
                         0,
                     ),
                     "manual_abstracts_found": sum(
-                        bool((row.get("abstract") or "").strip())
-                        for row in enriched_manual_rows
+                        bool((row.get("abstract") or "").strip()) for row in enriched_manual_rows
                     ),
                     "manual_llm_screened": sum(
                         bool((row.get("llm_decision") or "").strip())
                         for row in enriched_manual_rows
                     ),
                     "manual_llm_excluded": sum(
-                        row.get("llm_decision") == "exclude"
-                        for row in enriched_manual_rows
+                        row.get("llm_decision") == "exclude" for row in enriched_manual_rows
                     ),
                     "manual_llm_failed": sum(
-                        row.get("llm_status") == "failed"
-                        for row in enriched_manual_rows
+                        row.get("llm_status") == "failed" for row in enriched_manual_rows
                     ),
                     "abstract_api_requests": int(
                         target_round["counts"].get("abstract_api_requests") or 0
@@ -2481,8 +2841,7 @@ class PipelineService:
                     )
                     + enrichment_result.summary.rate_limit_retries,
                     "abstract_rate_limit_wait_seconds": float(
-                        target_round["counts"].get("abstract_rate_limit_wait_seconds")
-                        or 0
+                        target_round["counts"].get("abstract_rate_limit_wait_seconds") or 0
                     )
                     + enrichment_result.summary.rate_limit_wait_seconds,
                 }
@@ -2493,9 +2852,7 @@ class PipelineService:
             )
             target_round["files"]["manual_llm_screened_latest"] = str(llm_path)
             target_round["files"]["manual_llm_report_latest"] = str(llm_report_path)
-            target_round["files"]["manual_recommendations_latest"] = str(
-                recommendation_path
-            )
+            target_round["files"]["manual_recommendations_latest"] = str(recommendation_path)
             _record_manual_enrichment_flow(target_round, audit_rows)
             target_round["status"] = "ready_for_review"
             target_round["error"] = ""
@@ -2550,10 +2907,7 @@ class PipelineService:
             retained = [
                 row
                 for row in rows
-                if not (
-                    _is_direct_manual_audit_row(row)
-                    and _audit_row_matches_record(row, record)
-                )
+                if not (_is_direct_manual_audit_row(row) and _audit_row_matches_record(row, record))
             ]
             removed_here = len(rows) - len(retained)
             if not removed_here:
@@ -2567,24 +2921,18 @@ class PipelineService:
             enriched_manual_rows = [
                 row
                 for row in retained
-                if _is_direct_manual_audit_row(row)
-                and _manual_enrichment_completed(row)
+                if _is_direct_manual_audit_row(row) and _manual_enrichment_completed(row)
             ]
             round_state["counts"]["manual_enriched"] = len(enriched_manual_rows)
-            round_state["counts"]["manual_review_additions"] = len(
-                enriched_manual_rows
-            )
+            round_state["counts"]["manual_review_additions"] = len(enriched_manual_rows)
             round_state["counts"]["manual_abstracts_found"] = sum(
-                bool((row.get("abstract") or "").strip())
-                for row in enriched_manual_rows
+                bool((row.get("abstract") or "").strip()) for row in enriched_manual_rows
             )
             round_state["counts"]["manual_llm_screened"] = sum(
-                bool((row.get("llm_decision") or "").strip())
-                for row in enriched_manual_rows
+                bool((row.get("llm_decision") or "").strip()) for row in enriched_manual_rows
             )
             round_state["counts"]["manual_llm_excluded"] = sum(
-                row.get("llm_decision") == "exclude"
-                for row in enriched_manual_rows
+                row.get("llm_decision") == "exclude" for row in enriched_manual_rows
             )
             round_state["counts"]["manual_llm_failed"] = sum(
                 row.get("llm_status") == "failed" for row in enriched_manual_rows
@@ -2594,9 +2942,7 @@ class PipelineService:
 
         if collection_removed:
             audit_rounds = [
-                item
-                for item in state.get("rounds", [])
-                if item.get("files", {}).get("audit")
+                item for item in state.get("rounds", []) if item.get("files", {}).get("audit")
             ]
             rows_by_round = _audit_rows_by_round(audit_rounds)
             for round_state in audit_rounds:
@@ -2621,11 +2967,7 @@ class PipelineService:
             self._save_state(project_slug, state)
 
         return {
-            "status": (
-                "removed_from_review"
-                if review_rows_removed
-                else "removed_from_collection"
-            ),
+            "status": ("removed_from_review" if review_rows_removed else "removed_from_collection"),
             "collection_removed": collection_removed,
             "review_rows_removed": review_rows_removed,
         }
@@ -2692,9 +3034,7 @@ class PipelineService:
             raise RuntimeError("The final included corpus is empty.")
         settings = self.store.load_project(project_slug)
         selected_model = model.strip() or settings.corpus_analysis_model
-        api_key = self.store.read_api_key(project_slug) or os.environ.get(
-            "OPENAI_API_KEY", ""
-        )
+        api_key = self.store.read_api_key(project_slug) or os.environ.get("OPENAI_API_KEY", "")
         client = OpenAIResearchClient(
             base_url=settings.llm_base_url,
             api_key=api_key,
@@ -2703,10 +3043,7 @@ class PipelineService:
         analyzer = CorpusAnalyzer(client)
         analysis_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         output_dir = (
-            self.store.project_dir(project_slug)
-            / "analysis"
-            / state["run_id"]
-            / analysis_id
+            self.store.project_dir(project_slug) / "analysis" / state["run_id"] / analysis_id
         )
         tracked_progress = self._begin_progress(
             project_slug,
@@ -2776,6 +3113,14 @@ class PipelineService:
         except FileNotFoundError:
             return None
 
+    def run_log_path(self, project_slug: str) -> Path:
+        state = self.load_current_state(project_slug)
+        state_path = self._state_path(project_slug, state["run_id"])
+        log_path = state_path.with_name("run_log.json")
+        if not log_path.exists():
+            _write_run_log(state_path, state)
+        return log_path
+
     def _state_path(self, project_slug: str, run_id: str) -> Path:
         return self.store.project_dir(project_slug) / "runs" / run_id / "state.json"
 
@@ -2788,6 +3133,7 @@ class PipelineService:
             build_flow_svg(state),
             encoding="utf-8",
         )
+        _write_run_log(state_path, state)
 
     def _begin_progress(
         self,
@@ -2983,10 +3329,7 @@ def list_openai_models(
 
 
 def _manual_audit_row(record: PaperRecord, note: str) -> dict[str, str]:
-    row = {
-        str(key): "" if value is None else str(value)
-        for key, value in record.to_row().items()
-    }
+    row = {str(key): "" if value is None else str(value) for key, value in record.to_row().items()}
     row.update(
         {
             "auto_screening_decision": "needs_review",
@@ -3002,35 +3345,172 @@ def _manual_audit_row(record: PaperRecord, note: str) -> dict[str, str]:
     return row
 
 
+def _normalize_target_seed(
+    value: dict[str, str] | None,
+) -> dict[str, str] | None:
+    if value is None:
+        return None
+    title = str(value.get("title") or "").strip()
+    if not title:
+        raise ValueError("A paper title is required for single-paper snowballing.")
+    fields = [
+        "title",
+        "authors",
+        "year",
+        "venue",
+        "doi",
+        "url",
+        "dblp_key",
+        "publication_type",
+        "source",
+        "provider_id",
+        "abstract_provider_id",
+    ]
+    normalized = {field: str(value.get(field) or "").strip() for field in fields}
+    normalized.update(
+        {
+            "title": title,
+            "manual_decision": "include",
+            "manual_notes": "Single-paper snowball target selected by the researcher.",
+        }
+    )
+    return normalized
+
+
 def _initial_ai_exclusion_rows(state: dict[str, Any]) -> list[dict[str, str]]:
+    rows, _ = _initial_ai_exclusion_summary(state)
+    return rows
+
+
+def _initial_ai_exclusion_summary(
+    state: dict[str, Any],
+) -> tuple[list[dict[str, str]], dict[str, int]]:
     initial_round = next(
-        (
-            item
-            for item in state.get("rounds", [])
-            if int(item.get("index", -1)) == 0
-        ),
+        (item for item in state.get("rounds", []) if int(item.get("index", -1)) == 0),
         None,
     )
     if initial_round is None:
-        return []
+        return [], _empty_replay_filter_counts()
     llm_value = initial_round.get("files", {}).get("llm_screened")
     if not llm_value or not Path(llm_value).exists():
-        return []
-    reviewed_keys: set[str] = set()
-    for round_state in state.get("rounds", []):
-        audit_value = round_state.get("files", {}).get("audit")
-        if not audit_value or not Path(audit_value).exists():
-            continue
-        _, audit_rows = read_csv(Path(audit_value))
-        reviewed_keys.update(paper_key(row) for row in audit_rows)
+        return [], _empty_replay_filter_counts()
+
+    _, reviewed_rows = _cumulative_audit_rows(state, reviewed_only=True)
+    reviewed_keys = {key for row in reviewed_rows for key in paper_keys(row)}
     _, llm_rows = read_csv(Path(llm_value))
-    exclusions: dict[str, dict[str, str]] = {}
+    source_exclusions = [row for row in llm_rows if row.get("llm_decision") == "exclude"]
+    exclusions: list[dict[str, str]] = []
+    emitted: set[str] = set()
+    reviewed_removed = 0
     for row in llm_rows:
-        key = paper_key(row)
-        if row.get("llm_decision") != "exclude" or key in reviewed_keys:
+        if row.get("llm_decision") != "exclude":
             continue
-        exclusions.setdefault(key, row)
-    return list(exclusions.values())
+        keys = paper_keys(row)
+        if keys & emitted:
+            continue
+        emitted.update(keys)
+        if keys & reviewed_keys:
+            reviewed_removed += 1
+            continue
+        exclusions.append(row)
+    return exclusions, {
+        "source_exclusions": len(source_exclusions),
+        "deduplicated_exclusions": len(exclusions) + reviewed_removed,
+        "reviewed_removed": reviewed_removed,
+        "eligible": len(exclusions),
+    }
+
+
+def _empty_replay_filter_counts() -> dict[str, int]:
+    return {
+        "source_exclusions": 0,
+        "deduplicated_exclusions": 0,
+        "reviewed_removed": 0,
+        "eligible": 0,
+    }
+
+
+def _audit_paths(state: dict[str, Any]) -> list[Path]:
+    return [
+        Path(value)
+        for round_state in state.get("rounds", [])
+        if (value := round_state.get("files", {}).get("audit")) and Path(value).exists()
+    ]
+
+
+def _cumulative_audit_rows(
+    state: dict[str, Any],
+    *,
+    reviewed_only: bool,
+) -> tuple[list[str], list[dict[str, str]]]:
+    fieldnames: list[str] = []
+    rows: list[dict[str, str]] = []
+    alias_indexes: dict[str, int] = {}
+    for path in _audit_paths(state):
+        input_fields, audit_rows = read_csv(path)
+        fieldnames.extend(field for field in input_fields if field not in fieldnames)
+        for row in audit_rows:
+            if reviewed_only and not _is_human_reviewed(row):
+                continue
+            keys = paper_keys(row)
+            match_index = next(
+                (alias_indexes[key] for key in keys if key in alias_indexes),
+                None,
+            )
+            if match_index is None:
+                match_index = len(rows)
+                rows.append(dict(row))
+            else:
+                rows[match_index].update(row)
+            for key in paper_keys(rows[match_index]):
+                alias_indexes[key] = match_index
+    return fieldnames, rows
+
+
+def _is_human_reviewed(row: dict[str, str]) -> bool:
+    decision = str(row.get("manual_decision") or "").strip().lower()
+    return decision not in {"", "later"}
+
+
+def _row_alias_indexes(rows: list[dict[str, str]]) -> dict[str, int]:
+    return {key: index for index, row in enumerate(rows) for key in paper_keys(row)}
+
+
+def _matching_row_index(
+    indexes: dict[str, int],
+    row: dict[str, str],
+) -> int | None:
+    return next((indexes[key] for key in paper_keys(row) if key in indexes), None)
+
+
+def _audit_fingerprint(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path.resolve()).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(_file_sha256(path).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _ensure_prompt_replay_state(state: dict[str, Any]) -> dict[str, Any]:
+    replay = state.get("prompt_replay")
+    if isinstance(replay, dict):
+        return replay
+    refinement = state.get("prompt_refinement", {})
+    replay = {
+        "status": refinement.get("replay_status", "not_available"),
+        "refinement_id": refinement.get("refinement_id", ""),
+        "approved_prompt_path": refinement.get("approved_prompt_path", ""),
+        "replay_round": refinement.get("replay_round"),
+        "replayed_at": refinement.get("replayed_at", ""),
+        "replayed": int(refinement.get("replayed") or 0),
+        "recovered": int(refinement.get("recovered") or 0),
+        "reexcluded": int(refinement.get("reexcluded") or 0),
+        "failed": int(refinement.get("failed") or 0),
+    }
+    state["prompt_replay"] = replay
+    return replay
 
 
 def _file_sha256(path: Path) -> str:
@@ -3046,10 +3526,7 @@ def _text_sha256(value: str) -> str:
 
 
 def _manual_enrichment_input(record: PaperRecord) -> dict[str, str]:
-    row = {
-        str(key): "" if value is None else str(value)
-        for key, value in record.to_row().items()
-    }
+    row = {str(key): "" if value is None else str(value) for key, value in record.to_row().items()}
     row.update(
         {
             "auto_screening_decision": "needs_review",
@@ -3139,9 +3616,7 @@ def _manual_enrichment_targets(
             None,
         )
         if target_match is not None:
-            targets.append(
-                dedupe_records([record, PaperRecord.from_dict(target_match)])[0]
-            )
+            targets.append(dedupe_records([record, PaperRecord.from_dict(target_match)])[0])
     return dedupe_records(targets)
 
 
@@ -3158,9 +3633,7 @@ def _record_manual_enrichment_flow(
         "manual_return_to_review",
     }
     base_stages = [
-        stage
-        for stage in round_state.get("flow", [])
-        if stage.get("key") not in loop_keys
+        stage for stage in round_state.get("flow", []) if stage.get("key") not in loop_keys
     ]
     manual_rows = [
         row
@@ -3231,11 +3704,7 @@ def _record_manual_enrichment_flow(
         loop_to="human_audit",
     )
     insert_at = next(
-        (
-            index + 1
-            for index, stage in enumerate(base_stages)
-            if stage.get("key") == "human_audit"
-        ),
+        (index + 1 for index, stage in enumerate(base_stages) if stage.get("key") == "human_audit"),
         len(base_stages),
     )
     base_stages[insert_at:insert_at] = loop_holder["flow"]
@@ -3248,10 +3717,7 @@ def _apply_audit_summary(
 ) -> None:
     round_state["counts"]["reviewed"] = summary.reviewed
     round_state["counts"]["unreviewed"] = summary.unreviewed
-    included = (
-        summary.by_decision.get("include", 0)
-        + summary.by_decision.get("include_related", 0)
-    )
+    included = summary.by_decision.get("include", 0) + summary.by_decision.get("include_related", 0)
     record_flow_stage(
         round_state,
         key="human_audit",
@@ -3269,10 +3735,198 @@ def _invalidate_derived_outputs(state: dict[str, Any]) -> None:
     state.pop("corpus_analysis", None)
     for round_state in state.get("rounds", []):
         round_state["flow"] = [
-            stage
-            for stage in round_state.get("flow", [])
-            if stage.get("key") != "final_corpus"
+            stage for stage in round_state.get("flow", []) if stage.get("key") != "final_corpus"
         ]
+
+
+def _citation_provider_failure_count(round_state: dict[str, Any]) -> int:
+    values = round_state.get("counts", {}).get("provider_failures", {}) or {}
+    if not isinstance(values, dict):
+        return 0
+    return sum(max(int(value or 0), 0) for value in values.values())
+
+
+def _failed_seed_coverage_count(round_state: dict[str, Any]) -> int:
+    counts = round_state.get("counts", {})
+    if "coverage_failed_seeds" in counts:
+        return max(int(counts.get("coverage_failed_seeds") or 0), 0)
+    successes = counts.get("provider_successes", {}) or {}
+    if isinstance(successes, dict) and any(int(value or 0) > 0 for value in successes.values()):
+        return 0
+    return _citation_provider_failure_count(round_state)
+
+
+def _retry_provider_order(
+    retry_round: dict[str, Any] | None,
+    selected_providers: list[str],
+) -> list[str]:
+    if retry_round is None:
+        return selected_providers
+    counts = retry_round.get("counts", {})
+    successes = counts.get("provider_successes", {}) or {}
+    failures = counts.get("provider_failures", {}) or {}
+    if not isinstance(successes, dict) or not isinstance(failures, dict):
+        return selected_providers
+    pending = [
+        provider
+        for provider in selected_providers
+        if int(failures.get(provider, 0) or 0) > 0 or int(successes.get(provider, 0) or 0) <= 0
+    ]
+    return pending or selected_providers
+
+
+def _merge_retry_provider_summary(
+    result: SnowballingResult,
+    *,
+    retry_round: dict[str, Any] | None,
+    selected_providers: list[str],
+) -> SnowballingResult:
+    if retry_round is None:
+        return result
+    prior_values = retry_round.get("counts", {}).get("provider_successes", {}) or {}
+    prior_successes = Counter(
+        {
+            provider: int(prior_values.get(provider, 0) or 0)
+            for provider in selected_providers
+            if isinstance(prior_values, dict) and int(prior_values.get(provider, 0) or 0) > 0
+        }
+    )
+    prior_successes.update(result.summary.provider_successes)
+    unresolved_failures = Counter(
+        {
+            provider: int(result.summary.provider_failures.get(provider, 0) or 0)
+            for provider in selected_providers
+            if int(result.summary.provider_failures.get(provider, 0) or 0) > 0
+        }
+    )
+    unresolved_errors = {
+        provider: list(result.summary.provider_errors.get(provider, []))
+        for provider in unresolved_failures
+    }
+    summary = replace(
+        result.summary,
+        provider_order=tuple(selected_providers),
+        provider_successes=prior_successes,
+        provider_failures=unresolved_failures,
+        provider_errors=unresolved_errors,
+    )
+    return replace(result, summary=summary)
+
+
+def _ensure_checkpoint_file(source: Path, target: Path) -> None:
+    if target.exists() or not source.exists() or source == target:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    copy2(source, target)
+
+
+def _write_incremental_snowball_candidates(
+    snowball_path: Path,
+    output_path: Path,
+    *,
+    prior_paths: list[Path],
+) -> int:
+    seen: set[str] = set()
+    for path in dict.fromkeys(prior_paths):
+        if not path.exists():
+            continue
+        _, prior_rows = read_csv(path)
+        for row in prior_rows:
+            seen.update(paper_keys(row))
+
+    fieldnames, rows = read_csv(snowball_path)
+    incremental_rows: list[dict[str, str]] = []
+    for row in rows:
+        keys = paper_keys(row)
+        if keys & seen:
+            continue
+        incremental_rows.append(row)
+        seen.update(keys)
+    write_audit_csv(output_path, incremental_rows, fieldnames)
+    return len(incremental_rows)
+
+
+def _restore_audit_checkpoint(audit_path: Path, checkpoint_path: Path) -> AuditSummary:
+    current_fields, current_rows = read_csv(audit_path)
+    checkpoint_fields, checkpoint_rows = read_csv(checkpoint_path)
+    current_by_key = {paper_key(row): row for row in current_rows}
+    for checkpoint_row in checkpoint_rows:
+        key = paper_key(checkpoint_row)
+        current = current_by_key.get(key)
+        if current is not None:
+            current["manual_decision"] = checkpoint_row.get("manual_decision", "")
+            current["manual_notes"] = checkpoint_row.get("manual_notes", "")
+            continue
+        if not any(
+            (
+                checkpoint_row.get("manual_decision"),
+                checkpoint_row.get("manual_notes"),
+                checkpoint_row.get("manual_review_added"),
+            )
+        ):
+            continue
+        restored = dict(checkpoint_row)
+        current_rows.append(restored)
+        current_by_key[key] = restored
+    fields = list(
+        dict.fromkeys([*current_fields, *checkpoint_fields, "manual_decision", "manual_notes"])
+    )
+    write_audit_csv(audit_path, current_rows, fields)
+    return summarize_audit(current_rows)
+
+
+def _annotate_legacy_snowball_coverage(
+    enriched_path: Path,
+    round_state: dict[str, Any],
+) -> None:
+    if round_state.get("kind") != "snowball" or round_state.get("files", {}).get("seed_coverage"):
+        return
+    failures = round_state.get("counts", {}).get("provider_failures", {}) or {}
+    if not isinstance(failures, dict):
+        return
+    failed_providers = [
+        str(provider) for provider, count in failures.items() if int(count or 0) > 0
+    ]
+    if not failed_providers:
+        return
+
+    fieldnames, rows = read_csv(enriched_path)
+    changed = 0
+    missing_value = "; ".join(failed_providers)
+    legacy_note = (
+        "Legacy round-level provider warning; the earlier version did not preserve "
+        "exact per-seed failure attribution."
+    )
+    for row in rows:
+        if not row.get("snowball_relations") and not row.get("snowball_seed_titles"):
+            continue
+        if not row.get("snowball_coverage_status"):
+            row["snowball_coverage_status"] = "partial"
+        _merge_semicolon_csv_value(row, "snowball_missing_providers", missing_value)
+        _merge_semicolon_csv_value(row, "snowball_coverage_notes", legacy_note)
+        changed += 1
+    if not changed:
+        return
+    write_audit_csv(
+        enriched_path,
+        rows,
+        [
+            *fieldnames,
+            "snowball_coverage_status",
+            "snowball_missing_providers",
+            "snowball_coverage_notes",
+        ],
+    )
+    round_state.setdefault("counts", {})["legacy_coverage_marked_rows"] = changed
+
+
+def _merge_semicolon_csv_value(row: dict[str, str], field: str, value: str) -> None:
+    current = [item.strip() for item in str(row.get(field) or "").split(";") if item.strip()]
+    for item in str(value or "").split(";"):
+        normalized = item.strip()
+        if normalized and normalized not in current:
+            current.append(normalized)
+    row[field] = "; ".join(current)
 
 
 def _new_round_state(index: int, kind: str) -> dict[str, Any]:
@@ -3286,6 +3940,18 @@ def _new_round_state(index: int, kind: str) -> dict[str, Any]:
         "flow": [],
         "error": "",
     }
+
+
+def _retryable_snowball_round(state: dict[str, Any]) -> dict[str, Any] | None:
+    rounds = state.get("rounds", [])
+    if not rounds:
+        return None
+    latest = rounds[-1]
+    if latest.get("kind") != "snowball":
+        return None
+    if latest.get("status") in {"failed", "cancelled"}:
+        return latest
+    return None
 
 
 def _get_round(state: dict[str, Any], index: int) -> dict[str, Any]:
@@ -3349,6 +4015,28 @@ def _set_progress_paper_count(state: dict[str, Any], paper_count: int) -> None:
     state.setdefault("progress", {})["paper_count"] = max(int(paper_count), 0)
 
 
+def _batch_sizes(total: int, batch_size: int) -> list[int]:
+    safe_total = max(int(total), 0)
+    safe_batch_size = max(int(batch_size), 1)
+    return [
+        min(safe_batch_size, safe_total - start)
+        for start in range(0, safe_total, safe_batch_size)
+    ]
+
+
+def _round_prompt_replay_requested(
+    state: dict[str, Any],
+    round_state: dict[str, Any],
+) -> bool:
+    replay_state = _ensure_prompt_replay_state(state)
+    requested = round_state.get(
+        "replay_initial_exclusions",
+        round_state.get("kind") == "snowball"
+        and state.get("options", {}).get("replay_initial_exclusions"),
+    )
+    return bool(requested and replay_state.get("status") == "pending")
+
+
 def _with_title_screening_stage(stages: list[str], enabled: bool) -> list[str]:
     values = list(stages)
     if enabled:
@@ -3360,7 +4048,7 @@ def _with_title_screening_stage(stages: list[str], enabled: bool) -> list[str]:
 def _with_prompt_replay_stage(stages: list[str], enabled: bool) -> list[str]:
     values = list(stages)
     if enabled:
-        values.append("Re-screen initial AI exclusions")
+        values.insert(0, "Re-screen initial AI exclusions")
     return values
 
 
@@ -3377,14 +4065,10 @@ def _title_screening_counts(result: TitleScreeningResult | None) -> dict[str, in
 
 
 def _without_manual_provenance(record: PaperRecord) -> PaperRecord | None:
-    automatic_sources = [
-        source for source in record.discovery_sources if source != "manual"
-    ]
+    automatic_sources = [source for source in record.discovery_sources if source != "manual"]
     if not automatic_sources:
         return None
-    automatic_queries = [
-        query for query in record.discovery_queries if query != "manual addition"
-    ]
+    automatic_queries = [query for query in record.discovery_queries if query != "manual addition"]
     return replace(
         record,
         source=record.source if record.source != "manual" else automatic_sources[0],
@@ -3430,6 +4114,70 @@ def _optional_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def _write_run_log(state_path: Path, state: dict[str, Any]) -> None:
+    events_path = state_path.with_name("run_events.jsonl")
+    latest_round = state.get("rounds", [])[-1] if state.get("rounds") else {}
+    progress = state.get("progress", {})
+    event = {
+        "state_status": state.get("status", ""),
+        "round_index": latest_round.get("index"),
+        "round_status": latest_round.get("status", ""),
+        "operation": progress.get("operation", ""),
+        "progress_status": progress.get("status", ""),
+        "stage": progress.get("stage", ""),
+        "message": progress.get("message", ""),
+        "error": latest_round.get("error", ""),
+    }
+    signature = hashlib.sha256(
+        json.dumps(event, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    previous_signature = ""
+    if events_path.exists():
+        try:
+            last_line = next(
+                line
+                for line in reversed(events_path.read_text(encoding="utf-8").splitlines())
+                if line.strip()
+            )
+            previous_signature = str(json.loads(last_line).get("signature") or "")
+        except (OSError, StopIteration, ValueError, TypeError):
+            previous_signature = ""
+    if signature != previous_signature:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {"timestamp": _now(), "signature": signature, **event},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    events: list[dict[str, Any]] = []
+    if events_path.exists():
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                value.pop("signature", None)
+                events.append(value)
+    _write_json(
+        state_path.with_name("run_log.json"),
+        {
+            "schema_version": 1,
+            "exported_at": _now(),
+            "project_slug": state.get("project_slug", ""),
+            "run_id": state.get("run_id", ""),
+            "events": events,
+            "state": state,
+        },
+    )
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:

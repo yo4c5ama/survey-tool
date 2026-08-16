@@ -14,7 +14,7 @@ from vnn_survey.app.audit import (
 )
 from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
-from vnn_survey.config import load_config
+from vnn_survey.config import LlmScreeningConfig, load_config
 from vnn_survey.llm_screening import LlmScreeningResult, LlmScreeningSummary
 from vnn_survey.prompt_refinement import load_prompt_refinement
 
@@ -73,6 +73,95 @@ def test_prompt_refinement_requires_approval_before_changing_prompt(
     assert service.prompt_replay_overview(slug)["eligible"] == 2
 
 
+def test_later_prompt_refinement_uses_all_audits_without_reopening_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, service, slug, _state = _refinement_project(tmp_path)
+    settings = store.load_project(slug)
+    settings.prompt_refinement_model = "prompt-refinement-only"
+    store.save_project(settings)
+    client_models: list[str] = []
+    request_inputs: list[str] = []
+
+    class FakeResearchClient:
+        def __init__(self, **kwargs: object) -> None:
+            client_models.append(str(kwargs["model"]))
+
+        def json_response(self, **kwargs: object) -> dict[str, object]:
+            request_inputs.append(str(kwargs["input_text"]))
+            return {
+                "revised_prompt": f"Proposed prompt {len(request_inputs)}.",
+                "change_summary": "Use cumulative reviewer feedback.",
+                "retained_principles": [],
+                "new_rules": [],
+                "risks": [],
+            }
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.OpenAIResearchClient",
+        FakeResearchClient,
+    )
+
+    first = service.generate_prompt_refinement(slug)
+    first_id = first["prompt_refinement"]["refinement_id"]
+    service.approve_prompt_refinement(slug, "Approved first prompt.")
+    persisted = service.load_current_state(slug)
+    persisted["prompt_replay"].update({"status": "completed", "replay_round": 1, "replayed": 2})
+
+    round_1_path = store.project_dir(slug) / "audits" / persisted["run_id"] / "round_1.csv"
+    write_csv(
+        round_1_path,
+        [
+            {
+                "title": "Later Human Decision",
+                "year": "2026",
+                "doi": "10.1/later",
+                "abstract": "A later snowball result.",
+                "llm_decision": "maybe",
+                "manual_decision": "include_related",
+                "manual_notes": "Keep as formal-method context.",
+            }
+        ],
+        [
+            "title",
+            "year",
+            "doi",
+            "abstract",
+            "llm_decision",
+            "manual_decision",
+            "manual_notes",
+        ],
+    )
+    persisted["rounds"].append(
+        {
+            "index": 1,
+            "kind": "snowball",
+            "status": "ready_for_review",
+            "files": {"audit": str(round_1_path)},
+            "counts": {},
+            "flow": [],
+            "error": "",
+        }
+    )
+    service._save_state(slug, persisted)
+
+    second = service.generate_prompt_refinement(slug)
+    second_refinement = second["prompt_refinement"]
+    assert second_refinement["rows_total"] == 3
+    assert second_refinement["source_rounds"] == [0, 1]
+    assert "Later Human Decision" in request_inputs[-1]
+    assert "Keep as formal-method context." in request_inputs[-1]
+    _, feedback_rows = read_csv(Path(second_refinement["feedback_csv_path"]))
+    assert len(feedback_rows) == 3
+
+    approved = service.approve_prompt_refinement(slug, "Approved second prompt.")
+    assert approved["prompt_replay"]["status"] == "completed"
+    assert approved["prompt_replay"]["refinement_id"] == first_id
+    assert approved["prompt_refinement"]["replay_status"] == "completed"
+    assert client_models == ["prompt-refinement-only", "prompt-refinement-only"]
+
+
 def test_prompt_refinement_rejects_stale_human_feedback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -102,7 +191,7 @@ def test_prompt_refinement_rejects_stale_human_feedback(
     rows[0]["manual_notes"] = "Changed after proposal generation."
     write_csv(audit_path, rows, fields)
 
-    with pytest.raises(RuntimeError, match="initial audit changed"):
+    with pytest.raises(RuntimeError, match="audited feedback changed"):
         service.approve_prompt_refinement(slug, "Do not approve this stale proposal.")
 
 
@@ -167,6 +256,9 @@ def test_replay_recovers_only_newly_retained_initial_exclusions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, service, slug, state = _refinement_project(tmp_path)
+    settings = store.load_project(slug)
+    settings.prompt_replay_model = "historical-replay-only"
+    store.save_project(settings)
     approved_path = store.project_dir(slug) / "approved_prompt.txt"
     approved_path.write_text("Approved refined prompt.\n", encoding="utf-8")
     state["prompt_refinement"] = {
@@ -198,24 +290,23 @@ def test_replay_recovers_only_newly_retained_initial_exclusions(
         ["title", "year", "doi", "abstract", "auto_screening_decision"],
     )
 
+    replay_models: list[str] = []
+
     def fake_screen(
         input_path: Path,
         output_path: Path,
-        _config: object,
+        screening_config: LlmScreeningConfig,
         **_kwargs: object,
     ) -> LlmScreeningResult:
+        replay_models.append(screening_config.model)
         fields, rows = read_csv(input_path)
         for row in rows:
-            decision = (
-                "include" if row["title"] == "Hidden Include Recovery" else "exclude"
-            )
+            decision = "include" if row["title"] == "Hidden Include Recovery" else "exclude"
             row.update(
                 {
                     "llm_decision": decision,
                     "llm_scope": (
-                        "transformer_verification"
-                        if decision == "include"
-                        else "unrelated"
+                        "transformer_verification" if decision == "include" else "unrelated"
                     ),
                     "llm_confidence": "0.950",
                     "llm_reason": "Replayed with the approved prompt.",
@@ -234,9 +325,7 @@ def test_replay_recovers_only_newly_retained_initial_exclusions(
                 attempted=2,
                 by_status=Counter({"screened": 2}),
                 by_decision=Counter({"include": 1, "exclude": 1}),
-                by_scope=Counter(
-                    {"transformer_verification": 1, "unrelated": 1}
-                ),
+                by_scope=Counter({"transformer_verification": 1, "unrelated": 1}),
             ),
         )
 
@@ -261,8 +350,12 @@ def test_replay_recovers_only_newly_retained_initial_exclusions(
         "recovered": 1,
         "reexcluded": 1,
         "failed": 0,
+        "replay_source_exclusions": 2,
+        "replay_reviewed_removed": 0,
+        "replay_eligible": 2,
     }
     assert Path(files["prompt_replay_screened"]).exists()
+    assert replay_models == ["historical-replay-only"]
     _, replayed_rows = read_csv(enriched_path)
     by_title = {row["title"]: row for row in replayed_rows}
     assert by_title["Hidden Include Recovery"]["auto_screening_decision"] == "needs_review"
@@ -279,6 +372,69 @@ def test_replay_recovers_only_newly_retained_initial_exclusions(
 
     assert queued == 1
     assert [row["title"] for row in audit_rows] == ["Hidden Include Recovery"]
+
+
+def test_replay_removes_every_human_reviewed_alias_before_the_llm_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, service, slug, state = _refinement_project(tmp_path)
+    approved_path = store.project_dir(slug) / "approved_prompt.txt"
+    approved_path.write_text("Approved refined prompt.\n", encoding="utf-8")
+    state["prompt_refinement"] = {
+        "refinement_id": "revision-filter",
+        "status": "approved",
+        "approved_prompt_path": str(approved_path),
+        "replay_status": "pending",
+    }
+
+    llm_path = Path(state["rounds"][0]["files"]["llm_screened"])
+    fields, rows = read_csv(llm_path)
+    rows.append(
+        {
+            "title": "Human Include",
+            "year": "2026",
+            "doi": "10.1/published-version",
+            "abstract": "The same reviewed work under a new identifier.",
+            "llm_decision": "exclude",
+            "llm_status": "screened",
+        }
+    )
+    write_csv(llm_path, rows, fields)
+
+    processed = store.project_dir(slug) / "runs" / state["run_id"] / "processed"
+    enriched_path = processed / "candidate_papers_enriched_round_1.csv"
+    write_csv(enriched_path, [], ["title", "year", "doi", "abstract"])
+    captured_titles: list[str] = []
+
+    def capture_then_stop(input_path: Path, *_args: object, **_kwargs: object):
+        _, input_rows = read_csv(input_path)
+        captured_titles.extend(row["title"] for row in input_rows)
+        raise RuntimeError("stop after replay input capture")
+
+    monkeypatch.setattr(
+        "vnn_survey.app.pipeline_service.llm_screen_candidates",
+        capture_then_stop,
+    )
+
+    overview = service.prompt_replay_overview(slug)
+    assert overview["source_exclusions"] == 3
+    assert overview["reviewed_removed"] == 1
+    assert overview["eligible"] == 2
+
+    with pytest.raises(RuntimeError, match="stop after replay input capture"):
+        service._replay_initial_ai_exclusions(
+            project_slug=slug,
+            state=state,
+            round_index=1,
+            enriched_path=enriched_path,
+            config=load_config(store.config_path(slug)),
+            processed_dir=processed,
+            progress=None,
+        )
+
+    assert set(captured_titles) == {"Hidden Include Recovery", "Hidden Reexclude"}
+    assert "Human Include" not in captured_titles
 
 
 def _refinement_project(
