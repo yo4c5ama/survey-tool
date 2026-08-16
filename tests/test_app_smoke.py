@@ -1,4 +1,5 @@
 import csv
+import logging
 from pathlib import Path
 
 import streamlit as st
@@ -182,7 +183,9 @@ def test_manual_review_embeds_live_paper_addition_workspace(
 def test_manual_review_selects_a_newly_created_audit_round(
     monkeypatch,
     tmp_path: Path,
+    caplog,
 ) -> None:
+    caplog.set_level(logging.WARNING)
     projects_root = tmp_path / "projects"
     secrets_root = tmp_path / "secrets"
     monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
@@ -269,6 +272,10 @@ def test_manual_review_selects_a_newly_created_audit_round(
     selector = next(item for item in app.selectbox if item.key == f"audit_round_{run_id}")
     assert selector.options == ["0", "1"]
     assert selector.value == 1
+    assert not any(
+        "was created with a default value but also had its value set" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_ai_research_workspace_opens_for_exported_corpus(

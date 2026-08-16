@@ -1755,7 +1755,7 @@ def _render_manual_review(
     latest_marker_key = f"latest_audit_round_{state['run_id']}"
     latest_audit_round = indexes[-1]
     if st.session_state.get(latest_marker_key) != latest_audit_round:
-        st.session_state[selection_key] = latest_audit_round
+        st.session_state.pop(selection_key, None)
         st.session_state[latest_marker_key] = latest_audit_round
     round_index = st.selectbox(
         _t("Audit round"),
