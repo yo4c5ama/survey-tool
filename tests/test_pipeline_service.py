@@ -655,7 +655,17 @@ def test_existing_snowball_audit_is_backed_up_and_pruned_against_earlier_rounds(
     audit_dir.mkdir(parents=True, exist_ok=True)
     round_0 = audit_dir / "round_0.csv"
     round_1 = audit_dir / "round_1.csv"
-    fields = ["title", "year", "doi", "manual_decision", "manual_notes"]
+    fields = [
+        "title",
+        "year",
+        "doi",
+        "manual_decision",
+        "manual_notes",
+        "snowball_provider",
+        "snowball_coverage_status",
+        "snowball_missing_providers",
+        "snowball_coverage_notes",
+    ]
     with round_0.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -732,6 +742,12 @@ def test_existing_snowball_audit_is_backed_up_and_pruned_against_earlier_rounds(
 
     assert removed == 2
     assert [row["title"] for row in rows] == ["Only New Paper"]
+    assert {
+        "snowball_provider",
+        "snowball_coverage_status",
+        "snowball_missing_providers",
+        "snowball_coverage_notes",
+    }.isdisjoint(rows[0])
     assert Path(persisted["rounds"][1]["files"]["audit_pre_cleanup"]).exists()
 
 
@@ -1366,6 +1382,10 @@ def test_provider_failure_does_not_block_review_preparation(tmp_path: Path) -> N
                 "auto_screening_decision",
                 "snowball_relations",
                 "snowball_seed_titles",
+                "snowball_provider",
+                "snowball_coverage_status",
+                "snowball_missing_providers",
+                "snowball_coverage_notes",
             ],
         )
         writer.writeheader()
@@ -1377,6 +1397,10 @@ def test_provider_failure_does_not_block_review_preparation(tmp_path: Path) -> N
                 "auto_screening_decision": "include_candidate",
                 "snowball_relations": "forward",
                 "snowball_seed_titles": "Seed Paper",
+                "snowball_provider": "openalex",
+                "snowball_coverage_status": "partial",
+                "snowball_missing_providers": "semantic_scholar",
+                "snowball_coverage_notes": "semantic_scholar: rate limited",
             }
         )
     state = {
@@ -1428,9 +1452,15 @@ def test_provider_failure_does_not_block_review_preparation(tmp_path: Path) -> N
     _, audit_rows, audit_summary = load_audit(Path(prepared["rounds"][1]["files"]["audit"]))
     assert audit_summary.total == 1
     assert audit_rows[0]["title"] == "New Snowball Candidate"
-    assert audit_rows[0]["snowball_coverage_status"] == "partial"
-    assert audit_rows[0]["snowball_missing_providers"] == "semantic_scholar"
-    assert prepared["rounds"][1]["counts"]["legacy_coverage_marked_rows"] == 1
+    hidden_fields = {
+        "snowball_provider",
+        "snowball_coverage_status",
+        "snowball_missing_providers",
+        "snowball_coverage_notes",
+    }
+    assert hidden_fields.isdisjoint(audit_rows[0])
+    with enriched.open("r", encoding="utf-8", newline="") as handle:
+        assert hidden_fields.isdisjoint(csv.DictReader(handle).fieldnames or [])
 
 
 def test_review_preparation_restores_decisions_from_retry_checkpoint(tmp_path: Path) -> None:

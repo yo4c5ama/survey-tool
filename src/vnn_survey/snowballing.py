@@ -75,6 +75,14 @@ SNOWBALL_FIELDS = [
     "snowball_missing_providers",
     "snowball_coverage_notes",
 ]
+PAPER_CSV_HIDDEN_FIELDS = frozenset(
+    {
+        "snowball_provider",
+        "snowball_coverage_status",
+        "snowball_missing_providers",
+        "snowball_coverage_notes",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,15 +508,32 @@ def write_snowballed_csv(
     output_path: Path,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(input_fields)
+    fieldnames = [field for field in input_fields if field not in PAPER_CSV_HIDDEN_FIELDS]
     for field in [*STANDARD_FIELDS, *SNOWBALL_FIELDS]:
-        if field not in fieldnames:
+        if field not in PAPER_CSV_HIDDEN_FIELDS and field not in fieldnames:
             fieldnames.append(field)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def strip_per_paper_citation_diagnostics(path: Path) -> bool:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        original_fields = list(reader.fieldnames or [])
+        rows = [dict(row) for row in reader]
+    fieldnames = [field for field in original_fields if field not in PAPER_CSV_HIDDEN_FIELDS]
+    if fieldnames == original_fields:
+        return False
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows({field: row.get(field, "") for field in fieldnames} for row in rows)
+    os.replace(temporary_path, path)
+    return True
 
 
 def write_snowballing_summary(summary: SnowballingSummary, output_path: Path) -> None:

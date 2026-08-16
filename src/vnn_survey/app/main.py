@@ -1717,13 +1717,16 @@ def _render_manual_review(
         _render_manual_additions(store, service, project, embedded=True)
         return
     task = _task_manager().snapshot(project.slug)
-    if task and task.running and task.operation == "review_preparation":
+    review_preparation_running = bool(
+        task and task.running and task.operation == "review_preparation"
+    )
+    if review_preparation_running:
         _render_current_run_progress(
             project.slug,
             service,
             widget_scope="manual_review",
         )
-        return
+        st.divider()
     latest_round = state["rounds"][-1]
     pending_review_round = bool(
         latest_round.get("kind") == "snowball"
@@ -1731,7 +1734,7 @@ def _render_manual_review(
         and latest_round.get("files", {}).get("enriched")
         and not latest_round.get("files", {}).get("audit")
     )
-    if pending_review_round:
+    if pending_review_round and not review_preparation_running:
         st.warning(
             _t(
                 "Snowball round {round_index} has candidates that are not yet in a manual "
@@ -1743,7 +1746,7 @@ def _render_manual_review(
         st.divider()
     review_rounds = [item for item in state["rounds"] if item.get("files", {}).get("audit")]
     if not review_rounds:
-        if not pending_review_round:
+        if not pending_review_round and not review_preparation_running:
             st.info(_t("Prepare the current round for review in the Run center."))
         _render_manual_additions(store, service, project, embedded=True)
         return
@@ -1774,15 +1777,6 @@ def _render_manual_review(
     _, rows, summary = load_audit(audit_path)
     metric_slots = [column.empty() for column in st.columns(5)]
     _render_audit_metrics(metric_slots, summary)
-    if round_state.get("kind") == "snowball":
-        st.caption(
-            _t(
-                "Seed citation coverage describes whether citation providers completed "
-                "backward and forward retrieval for the seed that discovered a candidate. "
-                "It is not a relevance or quality judgment about the candidate paper."
-            )
-        )
-
     frame = pd.DataFrame(rows).fillna("")
     filter_col, decision_col = st.columns([2, 1])
     with filter_col:
@@ -1806,10 +1800,7 @@ def _render_manual_review(
             "venue_type",
             "core_rank",
             "impact_factor",
-            "snowball_coverage_status",
-            "snowball_missing_providers",
             "snowball_seed_titles",
-            "snowball_provider",
             "llm_decision",
             "llm_confidence",
             "llm_reason",
@@ -1817,6 +1808,7 @@ def _render_manual_review(
             "manual_notes",
         ]
         if column in filtered.columns
+        and (column != "impact_factor" or _has_known_impact_factor(filtered))
     ]
     editor_frame = filtered[visible_columns].copy()
     if "manual_decision" in editor_frame:
@@ -1825,10 +1817,8 @@ def _render_manual_review(
         editor_frame["llm_decision"] = editor_frame["llm_decision"].map(_decision_label)
     if "venue_type" in editor_frame:
         editor_frame["venue_type"] = editor_frame["venue_type"].map(_value_label)
-    if "snowball_coverage_status" in editor_frame:
-        editor_frame["snowball_coverage_status"] = editor_frame["snowball_coverage_status"].map(
-            _state_label
-        )
+    if "impact_factor" in editor_frame:
+        editor_frame["impact_factor"] = editor_frame["impact_factor"].map(_impact_factor_text)
     edited = st.data_editor(
         editor_frame,
         hide_index=True,
@@ -1846,25 +1836,9 @@ def _render_manual_review(
             "venue_type": st.column_config.TextColumn(_t("Venue type")),
             "core_rank": st.column_config.TextColumn(_t("CORE rank")),
             "impact_factor": st.column_config.TextColumn(_t("Impact Factor")),
-            "snowball_coverage_status": st.column_config.TextColumn(
-                _t("Seed citation coverage"),
-                width="medium",
-                help=_t(
-                    "Complete means all required provider queries succeeded; partial means "
-                    "some succeeded; failed means the seed could not be expanded."
-                ),
-            ),
-            "snowball_missing_providers": st.column_config.TextColumn(
-                _t("Missing citation providers"),
-                width="large",
-            ),
             "snowball_seed_titles": st.column_config.TextColumn(
                 _t("Snowball seeds"),
                 width="large",
-            ),
-            "snowball_provider": st.column_config.TextColumn(
-                _t("Citation providers"),
-                width="medium",
             ),
             "llm_decision": st.column_config.TextColumn(_t("AI decision")),
             "llm_confidence": st.column_config.TextColumn(_t("AI confidence")),
@@ -2870,12 +2844,17 @@ def _render_included_papers(included: pd.DataFrame) -> None:
             "manual_decision",
         ]
         if column in included.columns
+        and (column != "impact_factor" or _has_known_impact_factor(included))
     ]
     display_frame = included[display_columns].copy()
     if "venue_type" in display_frame:
         display_frame["venue_type"] = display_frame["venue_type"].map(_value_label)
     if "manual_decision" in display_frame:
         display_frame["manual_decision"] = display_frame["manual_decision"].map(_decision_label)
+    if "impact_factor" in display_frame:
+        display_frame["impact_factor"] = display_frame["impact_factor"].map(
+            _impact_factor_text
+        )
     st.dataframe(
         display_frame,
         hide_index=True,
@@ -3595,7 +3574,6 @@ def _render_current_run_progress_content(
             stage=_runtime_text(stage),
         )
 
-    overall_text = f"{overall_text} · {_t('{count} papers collected', count=paper_count)}"
     st.progress(overall_fraction, text=overall_text)
     st.progress(
         item_fraction,
@@ -3718,7 +3696,16 @@ def _render_run_log_download(
 
 
 def _current_paper_count(state: dict[str, Any]) -> int:
-    progress_count = state.get("progress", {}).get("paper_count")
+    progress = state.get("progress", {})
+    stage = str(progress.get("stage") or "")
+    stage_total = progress.get("total")
+    if (
+        progress.get("status") == "running"
+        and stage not in {"Literature search", "Citation snowballing"}
+        and stage_total not in (None, "")
+    ):
+        return max(int(stage_total), 0)
+    progress_count = progress.get("paper_count")
     if progress_count not in (None, ""):
         return max(int(progress_count), 0)
     latest = state.get("rounds", [{}])[-1]
@@ -3886,21 +3873,11 @@ def _audit_rows_changed(
 
 
 def _paper_metadata(row: dict[str, Any]) -> str:
-    def display_text(value: Any) -> str:
-        if value is None:
-            return ""
-        try:
-            if bool(pd.isna(value)):
-                return ""
-        except (TypeError, ValueError):
-            pass
-        return str(value).strip()
-
-    authors = display_text(row.get("authors"))
-    year = display_text(row.get("year"))
-    venue = display_text(row.get("venue"))
-    core_rank = display_text(row.get("core_rank"))
-    impact_factor = display_text(row.get("impact_factor"))
+    authors = _display_text(row.get("authors"))
+    year = _display_text(row.get("year"))
+    venue = _display_text(row.get("venue"))
+    core_rank = _display_text(row.get("core_rank"))
+    impact_factor = _impact_factor_text(row.get("impact_factor"))
     values = [
         authors,
         year,
@@ -3909,6 +3886,47 @@ def _paper_metadata(row: dict[str, Any]) -> str:
         f"IF {impact_factor}" if impact_factor else "",
     ]
     return " · ".join(value for value in values if value)
+
+
+def _display_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def _impact_factor_text(value: Any) -> str:
+    text = _display_text(value)
+    if text.casefold() in {
+        "",
+        "-",
+        "n/a",
+        "na",
+        "nan",
+        "none",
+        "null",
+        "unknown",
+        "not found",
+        "not available",
+        "unavailable",
+    }:
+        return ""
+    try:
+        if float(text) <= 0:
+            return ""
+    except ValueError:
+        pass
+    return text
+
+
+def _has_known_impact_factor(frame: pd.DataFrame) -> bool:
+    return "impact_factor" in frame and any(
+        _impact_factor_text(value) for value in frame["impact_factor"]
+    )
 
 
 def _format_bytes(value: Any) -> str:

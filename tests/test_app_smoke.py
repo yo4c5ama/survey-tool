@@ -397,8 +397,10 @@ def test_run_center_restores_saved_progress_and_paper_count(monkeypatch, tmp_pat
     assert not app.exception
     assert any(header.value == "Current run" for header in app.subheader)
     paper_metric = next(metric for metric in app.metric if metric.label == "Papers collected")
-    assert paper_metric.value == "37"
-    assert any("37 papers collected" in item.proto.text for item in app.get("progress"))
+    assert paper_metric.value == "10"
+    progress_text = [item.proto.text for item in app.get("progress")]
+    assert any("Stage 4 of 4: Abstract enrichment" in text for text in progress_text)
+    assert all("papers collected" not in text for text in progress_text)
 
 
 def test_live_progress_controls_render_only_in_the_relevant_module(
@@ -509,6 +511,21 @@ def test_manual_review_tracks_review_queue_creation_until_the_new_round_is_ready
         keyword_groups=[KeywordGroup("topic", ["verification"])],
     )
     run_id = "review-preparation-progress"
+    audit = store.project_dir(project.slug) / "audits" / run_id / "round_0.csv"
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    with audit.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["title", "manual_decision", "manual_notes"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "title": "Previously reviewed paper",
+                "manual_decision": "include",
+                "manual_notes": "Keep visible while the next round runs.",
+            }
+        )
     state = {
         "project_slug": project.slug,
         "run_id": run_id,
@@ -516,6 +533,15 @@ def test_manual_review_tracks_review_queue_creation_until_the_new_round_is_ready
         "created_at": "2026-01-01T00:00:00",
         "updated_at": "2026-01-01T00:00:00",
         "rounds": [
+            {
+                "index": 0,
+                "kind": "initial",
+                "status": "ready_for_review",
+                "files": {"audit": str(audit)},
+                "counts": {"audit_queue": 1, "reviewed": 1},
+                "flow": [],
+                "error": "",
+            },
             {
                 "index": 1,
                 "kind": "snowball",
@@ -563,6 +589,8 @@ def test_manual_review_tracks_review_queue_creation_until_the_new_round_is_ready
     assert not app.exception
     stop_keys = {item.key for item in app.button if item.label == "Stop run"}
     assert stop_keys == {f"stop_run_manual_review_{project.slug}"}
+    selector = next(item for item in app.selectbox if item.key == f"audit_round_{run_id}")
+    assert selector.value == 0
     assert not any(item.key == f"prepare_review_1_{project.slug}" for item in app.button)
 
 

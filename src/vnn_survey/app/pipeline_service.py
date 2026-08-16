@@ -64,6 +64,7 @@ from vnn_survey.snowballing import (
     SnowballingResult,
     export_seed_papers_from_csv,
     snowball_candidates,
+    strip_per_paper_citation_diagnostics,
     write_seed_coverage_report,
     write_snowballing_summary,
 )
@@ -1134,7 +1135,8 @@ class PipelineService:
         processed_dir = Path(round_state["files"]["enriched"]).parent
         suffix = "" if round_index == 0 else f"_round_{round_index}"
         enriched_path = Path(round_state["files"]["enriched"])
-        _annotate_legacy_snowball_coverage(enriched_path, round_state)
+        if round_state.get("kind") == "snowball":
+            strip_per_paper_citation_diagnostics(enriched_path)
         replay_requested = _round_prompt_replay_requested(state, round_state)
         if (
             (use_llm or replay_requested)
@@ -1319,7 +1321,7 @@ class PipelineService:
                 message="No new review candidates were found."
                 if queue_count == 0
                 else f"{queue_count} papers require human decisions.",
-                paper_count=_round_paper_count(round_state),
+                paper_count=queue_count,
             )
             return state
         except TaskCancelled:
@@ -2236,6 +2238,7 @@ class PipelineService:
                 seen.update(paper_keys(row))
 
         audit_path = Path(audit_value)
+        strip_per_paper_citation_diagnostics(audit_path)
         fieldnames, rows = read_csv(audit_path)
         emitted: set[str] = set()
         kept_rows: list[dict[str, str]] = []
@@ -2975,11 +2978,15 @@ class PipelineService:
     def generate_exports(self, project_slug: str) -> dict[str, Path]:
         state = self.load_current_state(project_slug)
         project_dir = self.store.project_dir(project_slug)
-        audit_paths = [
-            Path(item["files"]["audit"])
-            for item in state["rounds"]
-            if item.get("files", {}).get("audit")
-        ]
+        audit_paths: list[Path] = []
+        for item in state["rounds"]:
+            audit_value = item.get("files", {}).get("audit")
+            if not audit_value:
+                continue
+            audit_path = Path(audit_value)
+            if item.get("kind") == "snowball":
+                strip_per_paper_citation_diagnostics(audit_path)
+            audit_paths.append(audit_path)
         if not audit_paths:
             raise RuntimeError("No manual audit is available for export.")
         export_dir = project_dir / "exports" / state["run_id"]
@@ -3873,60 +3880,6 @@ def _restore_audit_checkpoint(audit_path: Path, checkpoint_path: Path) -> AuditS
     )
     write_audit_csv(audit_path, current_rows, fields)
     return summarize_audit(current_rows)
-
-
-def _annotate_legacy_snowball_coverage(
-    enriched_path: Path,
-    round_state: dict[str, Any],
-) -> None:
-    if round_state.get("kind") != "snowball" or round_state.get("files", {}).get("seed_coverage"):
-        return
-    failures = round_state.get("counts", {}).get("provider_failures", {}) or {}
-    if not isinstance(failures, dict):
-        return
-    failed_providers = [
-        str(provider) for provider, count in failures.items() if int(count or 0) > 0
-    ]
-    if not failed_providers:
-        return
-
-    fieldnames, rows = read_csv(enriched_path)
-    changed = 0
-    missing_value = "; ".join(failed_providers)
-    legacy_note = (
-        "Legacy round-level provider warning; the earlier version did not preserve "
-        "exact per-seed failure attribution."
-    )
-    for row in rows:
-        if not row.get("snowball_relations") and not row.get("snowball_seed_titles"):
-            continue
-        if not row.get("snowball_coverage_status"):
-            row["snowball_coverage_status"] = "partial"
-        _merge_semicolon_csv_value(row, "snowball_missing_providers", missing_value)
-        _merge_semicolon_csv_value(row, "snowball_coverage_notes", legacy_note)
-        changed += 1
-    if not changed:
-        return
-    write_audit_csv(
-        enriched_path,
-        rows,
-        [
-            *fieldnames,
-            "snowball_coverage_status",
-            "snowball_missing_providers",
-            "snowball_coverage_notes",
-        ],
-    )
-    round_state.setdefault("counts", {})["legacy_coverage_marked_rows"] = changed
-
-
-def _merge_semicolon_csv_value(row: dict[str, str], field: str, value: str) -> None:
-    current = [item.strip() for item in str(row.get(field) or "").split(";") if item.strip()]
-    for item in str(value or "").split(";"):
-        normalized = item.strip()
-        if normalized and normalized not in current:
-            current.append(normalized)
-    row[field] = "; ".join(current)
 
 
 def _new_round_state(index: int, kind: str) -> dict[str, Any]:

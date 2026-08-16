@@ -336,6 +336,7 @@ Manual review is the authoritative selection stage.
 - Select an audit round and filter by title/abstract text or current decision.
 - Inspect title, year, venue type, CORE rank, Impact Factor, abstract, AI
   recommendation, confidence, rationale, and cited evidence where available.
+  Impact Factor is hidden when no displayed paper has a known value.
 - Set **Include** for papers inside the primary scope.
 - Set **Related** for relevant downstream, background, repair, explainability, or
   methodology papers that should remain available and become snowball seeds but
@@ -417,7 +418,7 @@ Successful responses are cached for 24 hours, and the candidate CSV is updated
 after every seed. A provider failure does not discard successful results or block
 screening and review. Instead, each seed is marked `complete`, `partial`, or
 `failed`; missing providers and request errors are saved in a downloadable seed
-coverage report and propagated to discovered candidates. A `failed` seed prevents
+coverage report rather than repeated in every paper CSV. A `failed` seed prevents
 a false convergence claim, while `partial` coverage remains a visible warning.
 The summary preserves provider order, strategy, successes, failures, errors,
 per-seed coverage, available/fetched counts, and truncation. The current round
@@ -756,7 +757,7 @@ Crossref polite pool。输入后必须点击相应的 **Apply**。密钥只保�
 - **Query limit = 0** 表示执行全部生成查询，小数字适合测试。
 - **Abstract limit = 0** 表示补全全部合格候选，小数字适合验证摘要来源。
 - **DBLP auto** 先尝试 publication API，失败时回退到 SPARQL。
-- **CORE ranks online** 尝试补充会议等级。IF 或 rank 为空表示元数据未知，不等于质量低。
+- **CORE ranks online** 尝试补充会议等级。IF 或 rank 为空表示元数据未知，不等于质量低；当前表格全部 IF 未知时不显示该列。
 - **AI title prescreen** 在摘要补全前批量读取标题，以高召回方式排除明确无关项；模糊项保留。
 - **AI abstract screening** 在摘要补全后批量读取标题和摘要，生成更精细的纳入建议；
   每批完成后立即保存 CSV checkpoint，进度区显示批次、API 请求数和缓存命中数。
@@ -796,8 +797,8 @@ publication type、DOI、URL 和 addition note。补录记录也会标准化和�
 #### 3.6 人工审阅
 
 人工决定是最终依据。选择轮次后，可以搜索题目或摘要，并按未审阅、Include、Related、
-Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank、IF、AI 建议、置信度和
-理由；下方 Paper reader 用于完整阅读摘要和 AI evidence。
+Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank、已知 IF、AI 建议、置信度和
+理由；当前结果全部 IF 未知时隐藏 IF 列。下方 Paper reader 用于完整阅读摘要和 AI evidence。
 
 - **Include**：属于核心研究范围。
 - **Related**：与核心问题相关的 repair、explainability、下游技术、背景或方法论文；保留并
@@ -832,7 +833,7 @@ OpenCitations，并关闭 OpenAlex。**融合覆盖**会查询并合并所有数
 数据源后停止。某个数据源请求失败时，只标记受影响的 seed 和引用方向，后续 seed 仍会继续尝试该数据源。
 默认开启 **获取全部参考文献和引用论文**；成功响应缓存 24 小时，每完成一个 seed 就更新候选文件。
 部分数据源失败不会丢弃成功结果，也不会阻止后续筛选和人工审阅。每篇 seed 会标记为 `complete`、
-`partial` 或 `failed`，缺失来源和错误信息会写入可下载的覆盖报告，并随新候选进入审阅表。`partial`
+`partial` 或 `failed`，缺失来源和错误信息会写入可下载的独立覆盖报告，不再重复写入每篇论文 CSV 或审阅表。`partial`
 只产生警告；完全未成功滚雪球的 `failed` seed 会阻止系统误报收敛。开始下一轮之前，必须先为当前轮
 创建并完成人工审阅队列。只有引用图特别大时才建议关闭完整模式并设置每个 seed 的安全上限。
 
@@ -1010,8 +1011,8 @@ OpenCitations、OpenAlex 無効です。Merge coverage は全プロバイダー�
 最初の成功で停止します。プロバイダー障害は影響した seed と方向だけに記録され、後続の seed でも
 同じプロバイダーを再び試します。成功した応答は24時間キャッシュされ、seed ごとに候補ファイルを更新します。
 一部の失敗は成功済み結果を破棄せず、選別や人手レビューも妨げません。各 seed は `complete`、`partial`、
-`failed` として記録され、不足プロバイダーとエラーはダウンロード可能なカバレッジ報告およびレビュー表に
-保存されます。`partial` は警告のみで、全取得に失敗した `failed` seed は誤った収束判定を防ぎます。
+`failed` として記録され、不足プロバイダーとエラーはダウンロード可能な独立カバレッジ報告に保存され、
+各論文 CSV やレビュー表には重複表示されません。`partial` は警告のみで、全取得に失敗した `failed` seed は誤った収束判定を防ぎます。
 次のラウンドの前に、現在の候補からレビュー待ち行列を作成してください。非常に大きな citation graph の場合だけ完全取得を無効に
 して seed ごとの安全上限を設定できます。Converged は現在の seed、データソース、上限のもとで
 新しいユニーク文献が review queue に入らなかったことを意味し、完全性の証明ではありません。
@@ -1023,7 +1024,7 @@ fallback、checkpoint、coverage report、重複排除を使い、既に監査�
 #### 3.8 Results and AI research
 
 Results は included corpus、complete audit、Markdown report を作成し、年別・venue type 別集計を
-表示します。rank / IF の空欄は不明値です。AI research では最終文献の PDF Q&A を会話履歴付きで
+表示します。rank / IF の空欄は不明値で、表示対象の IF がすべて不明なら列自体を隠します。AI research では最終文献の PDF Q&A を会話履歴付きで
 利用でき、任意基準またはモデル提案 taxonomy による全体分類を JSON、CSV、Markdown で保存できます。
 AI 出力は必ず原論文で確認し、処理許可のある PDF だけをアップロードしてください。
 
@@ -1161,7 +1162,7 @@ OpenCitations, OpenAlex 비활성화입니다. Merge coverage는 모든 결과�
 중지합니다. 제공자 실패는 영향을 받은 seed와 방향에만 기록되며 이후 seed에서도 같은 제공자를 다시 시도합니다.
 성공한 응답은 24시간 캐시되며 seed마다 후보 파일이 갱신됩니다. 일부 제공자 실패는 성공한 결과를 버리거나
 선별 및 수동 검토를 막지 않습니다. 각 seed는 `complete`, `partial`, `failed`로 표시되고 누락된 제공자와
-오류는 다운로드 가능한 범위 보고서와 검토 표에 저장됩니다. `partial`은 경고만 남기며 모든 조회가 실패한
+오류는 다운로드 가능한 별도 범위 보고서에 저장되며 각 논문 CSV나 검토 표에는 반복 표시되지 않습니다. `partial`은 경고만 남기며 모든 조회가 실패한
 `failed` seed는 잘못된 수렴 판정을 막습니다. 다음 회차 전에 현재 후보의 검토 대기열을 만들어야 합니다.
 인용 그래프가 매우 클 때만 전체 수집을 끄고 seed별 안전 한도를 설정할 수 있습니다. Converged는 현재 seed, 소스, 제한에서 새 고유 논문이
 review queue에 들어오지 않았다는 뜻이며 완전성을 증명하지 않습니다.
@@ -1173,7 +1174,7 @@ review queue에 들어오지 않았다는 뜻이며 완전성을 증명하지 �
 #### 3.8 Results and AI research
 
 Results는 included corpus, complete audit, Markdown report를 만들고 연도와 venue type 분포를 표시합니다.
-rank / IF 공란은 알 수 없는 값입니다. AI research에서는 최종 논문의 PDF를 대화 기억과 함께 질문하거나,
+rank / IF 공란은 알 수 없는 값이며 표시할 IF가 모두 없으면 해당 열을 숨깁니다. AI research에서는 최종 논문의 PDF를 대화 기억과 함께 질문하거나,
 사용자 기준 또는 모델이 제안한 taxonomy로 전체 문헌을 분류해 JSON, CSV, Markdown으로 저장할 수 있습니다.
 AI 결과는 원문으로 검증하고 처리 권한이 있는 PDF만 업로드하세요.
 

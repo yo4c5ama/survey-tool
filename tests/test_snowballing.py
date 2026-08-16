@@ -626,9 +626,10 @@ def test_merge_strategy_unions_provider_provenance_without_duplicate_rows(
             {},
         ),
     )
+    output_path = tmp_path / "merged.csv"
     result = snowball_candidates(
         input_path,
-        tmp_path / "merged.csv",
+        output_path,
         config,
         seed_papers_path=seed_path,
         include_seed_papers=False,
@@ -637,6 +638,14 @@ def test_merge_strategy_unions_provider_provenance_without_duplicate_rows(
     shared = [row for row in result.rows if row["doi"] == "10.1/shared"]
     assert len(shared) == 1
     assert shared[0]["snowball_provider"] == "semantic_scholar; opencitations"
+    with output_path.open("r", encoding="utf-8", newline="") as handle:
+        exported_fields = set(csv.DictReader(handle).fieldnames or [])
+    assert {
+        "snowball_provider",
+        "snowball_coverage_status",
+        "snowball_missing_providers",
+        "snowball_coverage_notes",
+    }.isdisjoint(exported_fields)
 
 
 def _snowball_fixture(
