@@ -127,7 +127,14 @@ def test_manual_review_embeds_live_paper_addition_workspace(
     with audit.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["title", "year", "abstract", "manual_decision", "manual_notes"],
+            fieldnames=[
+                "title",
+                "year",
+                "abstract",
+                "url",
+                "manual_decision",
+                "manual_notes",
+            ],
         )
         writer.writeheader()
         writer.writerow(
@@ -135,6 +142,7 @@ def test_manual_review_embeds_live_paper_addition_workspace(
                 "title": "A Review Paper",
                 "year": "2025",
                 "abstract": "An abstract.",
+                "url": "https://example.org/review-paper.pdf",
                 "manual_decision": "",
                 "manual_notes": "",
             }
@@ -178,6 +186,11 @@ def test_manual_review_embeds_live_paper_addition_workspace(
         for item in app.button
     )
     assert any("saved automatically" in item.value for item in app.caption)
+    assert any(
+        'class="sf-paper-source-link"' in item.value
+        and 'href="https://example.org/review-paper.pdf"' in item.value
+        for item in app.markdown
+    )
 
 
 def test_manual_review_selects_a_newly_created_audit_round(

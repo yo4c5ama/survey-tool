@@ -6,6 +6,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlparse
 
 import pandas as pd
 import streamlit as st
@@ -1921,7 +1922,7 @@ def _render_review_paper_reader(
         key=f"paper_reader_{state['run_id']}_{round_index}",
     )
     paper = rows[selected]
-    st.markdown(f"### {paper.get('title', '')}")
+    _render_paper_reader_title(paper)
     st.caption(_paper_metadata(paper))
     st.markdown(f"**{_t('Abstract')}**")
     st.write(paper.get("abstract") or _t("No abstract is available."))
@@ -1930,6 +1931,29 @@ def _render_review_paper_reader(
         st.write(paper.get("llm_reason"))
         if paper.get("llm_evidence"):
             st.caption(_t("Evidence: {evidence}", evidence=paper.get("llm_evidence")))
+
+
+def _render_paper_reader_title(paper: dict[str, str]) -> None:
+    title = escape(_display_text(paper.get("title")))
+    paper_url = _paper_external_url(paper)
+    if not paper_url:
+        st.markdown(
+            f'<div class="sf-paper-title-row"><h3>{title}</h3></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    link_label = _t("Open PDF") if _looks_like_pdf_url(paper_url) else _t("Open paper page")
+    escaped_label = escape(link_label, quote=True)
+    st.markdown(
+        '<div class="sf-paper-title-row">'
+        f"<h3>{title}</h3>"
+        f'<a class="sf-paper-source-link" href="{escape(paper_url, quote=True)}" '
+        'target="_blank" rel="noopener noreferrer" '
+        f'title="{escaped_label}" aria-label="{escaped_label}">'
+        '<span class="material-symbols-rounded" aria-hidden="true">picture_as_pdf</span>'
+        "</a></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_audit_metrics(metric_slots: list[Any], summary: AuditSummary) -> None:
@@ -3904,6 +3928,34 @@ def _display_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _paper_external_url(row: dict[str, Any]) -> str:
+    direct_url = _display_text(row.get("url"))
+    if direct_url.startswith("//"):
+        direct_url = f"https:{direct_url}"
+    elif direct_url.casefold().startswith("www."):
+        direct_url = f"https://{direct_url}"
+    parsed = urlparse(direct_url)
+    if parsed.scheme.casefold() in {"http", "https"} and parsed.netloc:
+        return direct_url
+
+    doi = _display_text(row.get("doi"))
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if doi.casefold().startswith(prefix):
+            doi = doi[len(prefix) :].strip()
+            break
+    if not doi or any(character.isspace() for character in doi):
+        return ""
+    return f"https://doi.org/{quote(doi, safe='/:._-();')}"
+
+
+def _looks_like_pdf_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.path.casefold().endswith(".pdf") or parsed.query.casefold() in {
+        "download=pdf",
+        "format=pdf",
+    }
+
+
 def _impact_factor_text(value: Any) -> str:
     text = _display_text(value)
     if text.casefold() in {
@@ -4191,6 +4243,53 @@ def _apply_styles() -> None:
         [data-testid="stAlert"] {border-radius: 7px;}
         [data-testid="stProgressBar"] > div > div {background: var(--sf-blue);}
         [data-testid="stAppDeployButton"] {display: none;}
+        .sf-paper-title-row {
+            align-items: center;
+            display: flex;
+            gap: 0.42rem;
+            margin: 0.75rem 0 0.2rem;
+            max-width: 100%;
+        }
+        .sf-paper-title-row h3 {
+            margin: 0 !important;
+            overflow-wrap: anywhere;
+        }
+        .sf-paper-source-link {
+            align-items: center;
+            border-radius: 6px;
+            color: #c53b35 !important;
+            display: inline-flex;
+            flex: 0 0 28px;
+            height: 28px;
+            justify-content: center;
+            text-decoration: none !important;
+            transition: background-color 120ms ease, color 120ms ease;
+            width: 28px;
+        }
+        .sf-paper-source-link:hover {
+            background: #f7e8e7;
+            color: #a82f2a !important;
+        }
+        .sf-paper-source-link:focus-visible {
+            box-shadow: 0 0 0 3px var(--sf-focus);
+            outline: none;
+        }
+        .sf-paper-source-link .material-symbols-rounded {
+            direction: ltr;
+            display: inline-flex;
+            font-family: "Material Symbols Rounded";
+            font-size: 20px;
+            font-style: normal;
+            font-weight: normal;
+            font-variation-settings: "FILL" 0, "wght" 500, "GRAD" 0, "opsz" 20;
+            letter-spacing: normal;
+            line-height: 1;
+            text-transform: none;
+            white-space: nowrap;
+            word-wrap: normal;
+            -webkit-font-feature-settings: "liga";
+            -webkit-font-smoothing: antialiased;
+        }
         .survey-flow {
             display: flex;
             align-items: center;

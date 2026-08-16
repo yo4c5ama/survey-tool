@@ -348,8 +348,10 @@ Manual review is the authoritative selection stage.
 Decisions and reviewer notes are saved automatically whenever a cell edit is
 committed. Counts and the human-audit flow stage refresh immediately. The audit
 CSV can be downloaded at any time, and the paper reader below the table provides
-a larger abstract and AI-evidence view. Any audit change invalidates older final
-exports so Results cannot silently display a stale corpus.
+a larger abstract and AI-evidence view. The PDF icon beside its title opens the
+paper URL, or the DOI fallback, in a new tab; it is hidden when neither is
+available. Any audit change invalidates older final exports so Results cannot
+silently display a stale corpus.
 
 After every paper in any audit round has a final decision, the **Prompt
 refinement** section can ask its independently configured model to compare all
@@ -799,6 +801,7 @@ publication type、DOI、URL 和 addition note。补录记录也会标准化和�
 人工决定是最终依据。选择轮次后，可以搜索题目或摘要，并按未审阅、Include、Related、
 Exclude、Later 过滤。表格同时显示年份、venue、类型、CORE rank、已知 IF、AI 建议、置信度和
 理由；当前结果全部 IF 未知时隐藏 IF 列。下方 Paper reader 用于完整阅读摘要和 AI evidence。
+题目旁的 PDF 图标会在新标签页打开论文 URL，URL 缺失时回退到 DOI；两者都没有时不显示图标。
 
 - **Include**：属于核心研究范围。
 - **Related**：与核心问题相关的 repair、explainability、下游技术、背景或方法论文；保留并
@@ -988,6 +991,8 @@ AI は推奨にすぎず、人の判定が最終結果です。各論文を Incl
 分けて保持したい文献に使えます。セル編集を確定すると判定とメモは自動保存され、件数とフローも
 更新されます。全件を確定しないと次の snowball round へ進めません。監査変更後は古い最終出力が
 無効になるため、Results で再生成してください。
+Paper reader のタイトル横にある PDF アイコンを押すと、論文 URL（ない場合は DOI）が新しいタブで
+開きます。どちらもない場合、アイコンは表示されません。
 
 各監査 round の全件を確定した後、**Prompt refinement** で、これまでの全判定と reviewer notes を
 累積 CSV にまとめ、現在の抄録選別 prompt とともに専用モデルへ渡せます。完全な改訂 prompt、変更概要、
@@ -1138,6 +1143,8 @@ Later는 임시 보류에만 사용합니다. Related는 repair, explainability,
 문헌과 구분해 보존할 때 사용할 수 있습니다. 셀 편집을 확정하면 결정과 메모가 자동 저장되고 통계와
 흐름도 즉시 갱신됩니다. 모든 논문을 확정해야 다음 snowball round로 진행할 수 있습니다. audit이
 바뀌면 이전 최종 결과는 무효화되므로 Results에서 다시 생성해야 합니다.
+Paper reader의 제목 옆 PDF 아이콘을 누르면 논문 URL을 새 탭에서 열며, URL이 없으면 DOI를
+사용합니다. 둘 다 없으면 아이콘을 표시하지 않습니다.
 
 각 audit 회차를 모두 확정한 뒤 **Prompt refinement**에서 지금까지의 모든 결정과 reviewer notes를
 누적 CSV로 만들고 현재 초록 선별 prompt와 함께 전용 모델에 보낼 수 있습니다. 완전한 개정 prompt,

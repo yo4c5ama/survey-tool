@@ -8,6 +8,8 @@ from vnn_survey.app.main import (
     _download_button,
     _has_known_impact_factor,
     _impact_factor_text,
+    _looks_like_pdf_url,
+    _paper_external_url,
     _paper_metadata,
 )
 
@@ -52,6 +54,21 @@ def test_unknown_impact_factor_values_are_not_displayed() -> None:
     assert _paper_metadata({"title": "Paper", "impact_factor": "unknown"}) == ""
     assert not _has_known_impact_factor(pd.DataFrame({"impact_factor": ["", "N/A", 0]}))
     assert _has_known_impact_factor(pd.DataFrame({"impact_factor": ["", 4.2]}))
+
+
+def test_paper_external_url_prefers_safe_url_then_falls_back_to_doi() -> None:
+    assert (
+        _paper_external_url(
+            {"url": "https://example.org/paper.pdf", "doi": "10.1000/fallback"}
+        )
+        == "https://example.org/paper.pdf"
+    )
+    assert _paper_external_url({"doi": "doi:10.1000/example"}) == (
+        "https://doi.org/10.1000/example"
+    )
+    assert _paper_external_url({"url": "javascript:alert(1)"}) == ""
+    assert _looks_like_pdf_url("https://example.org/paper.pdf?download=1")
+    assert not _looks_like_pdf_url("https://example.org/paper")
 
 
 def test_audit_rows_changed_only_detects_review_field_edits() -> None:
