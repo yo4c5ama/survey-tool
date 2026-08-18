@@ -5,6 +5,7 @@ from pathlib import Path
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from vnn_survey.ai_research import PaperWorkspace
 from vnn_survey.app.pipeline_service import PipelineService
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
 from vnn_survey.app.task_manager import TaskManager, TaskSnapshot
@@ -102,6 +103,109 @@ def test_manual_review_allows_paper_additions_before_discovery(
     assert any(
         item.key == "manual_lookup_title_manual-workspace" for item in app.text_input
     )
+
+
+def test_snowball_page_shows_selectable_round_history_and_delete_control(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    secrets_root = tmp_path / "secrets"
+    monkeypatch.setenv("VNN_SURVEY_APP_DATA", str(projects_root))
+    monkeypatch.setenv("VNN_SURVEY_APP_SECRETS", str(secrets_root))
+    store = ProjectStore(projects_root, secrets_root)
+    project = store.create_project(
+        name="Snowball history",
+        research_question="Which papers?",
+        scope_description="Test history UI.",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    service = PipelineService(store)
+    run_id = "history-ui-run"
+    project_dir = store.project_dir(project.slug)
+    audit_dir = project_dir / "audits" / run_id
+    processed = project_dir / "runs" / run_id / "processed"
+    audit_dir.mkdir(parents=True)
+    processed.mkdir(parents=True)
+
+    audit_fields = ["title", "year", "manual_decision", "manual_notes"]
+    initial_audit = audit_dir / "round_0.csv"
+    snowball_audit = audit_dir / "round_1.csv"
+    for path, title in [
+        (initial_audit, "Initial seed"),
+        (snowball_audit, "New paper"),
+    ]:
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=audit_fields)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "title": title,
+                    "year": "2025",
+                    "manual_decision": "include",
+                    "manual_notes": "Keep",
+                }
+            )
+    snowball_new = processed / "candidate_papers_snowball_new_round_1.csv"
+    with snowball_new.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["title", "snowball_relations"])
+        writer.writeheader()
+        writer.writerow({"title": "New paper", "snowball_relations": "backward; forward"})
+    seed_path = project_dir / "seeds" / f"{run_id}_round_1.yaml"
+    seed_path.write_text("papers: []\n", encoding="utf-8")
+
+    state = {
+        "project_slug": project.slug,
+        "run_id": run_id,
+        "status": "awaiting_manual_review",
+        "rounds": [
+            {
+                "index": 0,
+                "kind": "initial",
+                "status": "ready_for_review",
+                "files": {"audit": str(initial_audit)},
+                "counts": {"audit_queue": 1},
+                "flow": [],
+            },
+            {
+                "index": 1,
+                "kind": "snowball",
+                "status": "ready_for_review",
+                "snowball_mode": "incremental",
+                "files": {
+                    "audit": str(snowball_audit),
+                    "snowball_new": str(snowball_new),
+                    "seeds": str(seed_path),
+                },
+                "counts": {
+                    "seeds": 1,
+                    "added_rows": 1,
+                    "audit_queue": 1,
+                    "coverage_complete_seeds": 1,
+                },
+                "flow": [],
+            },
+        ],
+    }
+    store.set_current_run(project.slug, run_id)
+    service._save_state(project.slug, state)
+    st.cache_resource.clear()
+
+    app_path = Path(__file__).parents[1] / "src" / "vnn_survey" / "app" / "main.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=20)
+    workspace = next(item for item in app.radio if item.key == "workspace_page")
+    workspace.set_value("snowball")
+    app.run(timeout=20)
+
+    assert not app.exception
+    history = next(
+        item for item in app.selectbox if item.key == f"snowball_history_round_{run_id}"
+    )
+    assert history.value == 1
+    assert any(item.label == "Delete selected round" for item in app.expander)
+    assert any("Round files" in item.value for item in app.markdown)
 
 
 def test_manual_review_embeds_live_paper_addition_workspace(
@@ -347,9 +451,45 @@ def test_ai_research_workspace_opens_for_exported_corpus(
     app.run(timeout=20)
 
     assert not app.exception
-    assert any(tab.label == "Paper Q&A" for tab in app.tabs)
+    assert any(tab.label == "Paper analysis" for tab in app.tabs)
     assert any(tab.label == "Corpus classification" for tab in app.tabs)
     assert any("A Final Paper" in header.value for header in app.markdown)
+    assert any(button.label == "Analyze paper" for button in app.button)
+    assert not app.chat_input
+
+    paper = {
+        "title": "A Final Paper",
+        "authors": "A. Author",
+        "year": "2025",
+        "venue": "A Venue",
+        "doi": "10.1000/final",
+        "abstract": "An abstract.",
+    }
+    PaperWorkspace(store.project_dir(project.slug)).save_analysis(
+        paper,
+        content="## English\nA concise saved briefing.",
+        model="gpt-test",
+        response_id="resp_saved",
+        source_kind="metadata",
+        source_url="https://doi.org/10.1000/final",
+        interface_language="en",
+    )
+    app.run(timeout=20)
+
+    assert not app.exception
+    assert any("A concise saved briefing." in item.value for item in app.markdown)
+    assert any(
+        item.placeholder == "Ask a question about this paper" for item in app.chat_input
+    )
+
+    language = next(item for item in app.selectbox if item.key == "ui_language")
+    language.set_value("zh")
+    app.run(timeout=20)
+
+    assert not app.exception
+    assert any(tab.label == "论文分析" for tab in app.tabs)
+    assert any(item.value == "AI 论文导读" for item in app.subheader)
+    assert any(item.placeholder == "针对这篇论文提问" for item in app.chat_input)
 
 
 def test_run_center_restores_saved_progress_and_paper_count(monkeypatch, tmp_path: Path) -> None:

@@ -9,18 +9,6 @@ snowballing, final export, PDF question answering, and corpus classification.
 
 ## Workflow
 
-```mermaid
-flowchart TD
-    A["Define research scope"] --> B["Literature discovery"]
-    B --> C["Normalize and deduplicate"]
-    C --> D["Rule screening"]
-    D --> E["AI title screening<br/>(optional)"]
-    E --> F["AI abstract screening<br/>(optional)"]
-    F --> G["Add known papers"]
-    G --> H["Human audit"]
-    H --> I["Citation snowballing"]
-    I -- "New records" --> C
-    I -- "Converged" --> J["Final corpus"]
 ```
 
 AI screening is optional and produces recommendations only. A human reviewer
@@ -82,6 +70,10 @@ If `uv` is already installed:
 uv sync --no-dev
 uv run vnn-survey-app
 ```
+
+For maintainers, `make package` refreshes both the directly runnable `dist/`
+workspace and `dist/SurveyFlow-quickstart.zip`. Existing projects, backups,
+saved secrets, and the local virtual environment inside `dist/` are preserved.
 
 #### Docker
 
@@ -190,7 +182,8 @@ AI settings are project-specific.
   abstract-screening request. The default is 20 and the maximum is 50. Results
   are cached per paper; a failed batch is divided automatically until an
   individual failing paper can be isolated.
-- **Paper Q&A model** answers questions about uploaded PDFs.
+- **Paper analysis and Q&A model** generates the first bilingual briefing and
+  answers follow-up questions using the best available paper source.
 - **Corpus analysis model** proposes a taxonomy and classifies the final corpus.
 - **Refresh model list** loads the models available to the configured key and
   endpoint. Every AI task has an independent selector so cost and depth can be
@@ -198,8 +191,8 @@ AI settings are project-specific.
 
 **Credentials**
 
-- The **OpenAI API key** enables title screening, abstract screening, PDF Q&A,
-  and corpus classification.
+- The **OpenAI API key** enables title screening, abstract screening, paper
+  analysis and Q&A, and corpus classification.
 - The **OpenAlex API key** is needed only when OpenAlex is selected for
   discovery, enrichment, or citation snowballing.
 - A **Semantic Scholar API key** is optional but gives its discovery,
@@ -391,6 +384,15 @@ a human-only queue), and save the new Manual Review round. While that task is
 running, Manual Review follows its progress; when it completes, the new round is
 added to the round selector and selected automatically.
 
+The **Snowball round history** panel selects any completed or interrupted
+snowball round and shows its seeds, newly discovered papers, backward/forward
+direction counts, screening stages, manual decisions, citation coverage, and
+downloadable round files. Deleting a selected round also removes every later
+round that depends on it, while round 0 is retained. Before deletion, SurveyFlow
+automatically creates a restorable current-project ZIP without API keys or
+rebuildable caches. It then rebuilds the cumulative audit and invalidates final
+exports derived from the removed rounds.
+
 The page separates **Latest reviewed seeds**, **Single-paper snowball**, and
 **Update AI prompt** into distinct tabs. Single-paper mode is intended for a
 known paper whose earlier citation lookup failed or for a deliberate additional
@@ -456,10 +458,19 @@ remains reproducible.
 
 This page becomes available after final exports are generated.
 
-**Paper Q&A** lets the user select an included paper, upload its PDF, select a
-model, and ask detailed questions. The PDF, provider file identifier, and
-conversation history are stored locally for that paper. **Clear conversation**
-starts a fresh local history.
+**Paper analysis** starts with a paper selector, not a chat box. Select an
+included paper and generate a fixed-format briefing that explains its problem,
+method, contributions, overall story, and a simple illustrative example. The
+model receives every saved paper field plus the best available source: an
+uploaded PDF first, otherwise the paper URL or DOI page, then the abstract and
+metadata as an explicit fallback. The briefing is written in English and the
+current interface language and is saved locally for that paper.
+
+Follow-up Q&A appears only after the briefing exists. Questions reuse the same
+paper source, the saved briefing, and that paper's local conversation history.
+Uploading a better PDF or changing the interface language does not discard old
+work; regenerate the briefing when you want it to use the new source or language.
+**Clear conversation** removes follow-up history without deleting the briefing.
 
 **Corpus classification** analyzes the whole included corpus. Enter guidance
 such as verified property, method, guarantee type, research objective, or
@@ -683,6 +694,9 @@ uv sync --no-dev
 uv run vnn-survey-app
 ```
 
+维护者运行 `make package` 时，会同时更新可直接运行的 `dist/` 目录和
+`dist/SurveyFlow-quickstart.zip`。`dist/` 中已有的项目、备份、密钥和虚拟环境会保留。
+
 使用 Docker 时运行 `docker compose up --build`，停止时运行 `docker compose down`。
 
 ### 3. 各页面功能
@@ -845,6 +859,12 @@ OpenCitations，并关闭 OpenAlex。**融合覆盖**会查询并合并所有数
 扩展。它沿用相同的数据源 fallback、checkpoint、覆盖报告和跨轮去重；如果目标论文本身早已人工审阅，
 它不会再次进入审阅表，只有从未见过的参考文献与引用论文继续后续流程。
 
+**滚雪球轮次历史**可选择任意已完成或中断的轮次，查看 seed、新增论文、backward/forward
+方向数量、筛选阶段、人工决定、引文覆盖状态，并下载该轮文件。删除所选轮次时，所有依赖它的
+后续轮次会一并回退，但第 0 轮始终保留。删除前，SurveyFlow 会自动创建一个可通过项目导入功能
+恢复的当前项目 ZIP，其中不包含 API 密钥和可重新生成的缓存；随后重建累计审阅结果，并使依赖
+已删除轮次的旧最终导出失效。
+
 “Converged”只表示在当前 seed、数据源和数量限制下，没有新的唯一论文进入下一轮审阅队列；
 它不证明全世界不存在遗漏文献。也可以根据预先写明的停止规则主动结束。
 
@@ -862,8 +882,14 @@ OpenCitations，并关闭 OpenAlex。**融合覆盖**会查询并合并所有数
 
 #### 3.9 AI 研究
 
-生成最终导出后才能使用。**Paper Q&A** 允许选择一篇最终论文、上传 PDF、单独选择模型并
-连续提问；PDF、远程 file id 和对话记忆按论文保存在本地，也可清空会话。
+生成最终导出后才能使用。**Paper analysis** 首先通过下拉列表选择一篇最终论文，此时不会直接
+显示聊天框。点击分析后，固定 Prompt 会说明论文的问题、方法、贡献、整体故事和一个简单的说明性
+例子，并以英文和当前界面语言输出。模型会收到该论文的全部已保存字段，并依次优先使用上传的 PDF、
+论文 URL 或 DOI 页面，最后才明确降级为摘要与元数据。导读按论文保存在本地。
+
+只有导读生成后才会出现后续问答。后续问题会继续使用论文材料、已保存导读和该论文的独立对话记忆。
+补传 PDF 或切换界面语言不会删除原结果；需要使用新材料或新语言时点击重新生成导读。清除对话只会
+删除后续问答记录，不会删除导读。
 
 **Corpus classification** 对最终文献集整体分类。用户可以用英文填写分类依据，例如 property、
 method、guarantee type、research objective 或 application domain；留空时由模型自己提出 taxonomy。
@@ -917,6 +943,8 @@ sh start.sh
 自動で導入し、システム Python は変更しません。終了するには起動ターミナルまたはコマンド
 ウィンドウを閉じます。Streamlit の開発者ショートカットは無効で、ブラウザーのコピー操作を
 妨げません。`uv` がある場合は `uv sync --no-dev`、`uv run vnn-survey-app` でも起動できます。
+保守担当者が `make package` を実行すると、実行可能な `dist/` と ZIP の両方が更新され、既存の
+プロジェクト、バックアップ、保存済み key、仮想環境は保持されます。
 Docker の場合は `docker compose up --build`、終了は `docker compose down` です。
 
 ### 3. 各ページ
@@ -1026,11 +1054,19 @@ OpenCitations、OpenAlex 無効です。Merge coverage は全プロバイダー�
 失敗した既知論文や追加 seed は、タイトル検索でメタデータを確認して単独実行できます。通常 round と同じ
 fallback、checkpoint、coverage report、重複排除を使い、既に監査済みの target 自体は再レビューされません。
 
+**Snowball round history** では、完了または中断した任意のラウンドを選び、seed、新規論文、
+backward/forward の件数、選別ステージ、人手判定、引用カバレッジ、ダウンロード可能なファイルを
+確認できます。選択ラウンドを削除すると、それに依存する後続ラウンドも削除されますが、ラウンド 0 は
+保持されます。削除前には API キーと再生成可能なキャッシュを含まない、インポート可能な現プロジェクト ZIP を
+自動作成し、削除後は累積監査を再構築して古い最終出力を無効化します。
+
 #### 3.8 Results and AI research
 
 Results は included corpus、complete audit、Markdown report を作成し、年別・venue type 別集計を
-表示します。rank / IF の空欄は不明値で、表示対象の IF がすべて不明なら列自体を隠します。AI research では最終文献の PDF Q&A を会話履歴付きで
-利用でき、任意基準またはモデル提案 taxonomy による全体分類を JSON、CSV、Markdown で保存できます。
+表示します。rank / IF の空欄は不明値で、表示対象の IF がすべて不明なら列自体を隠します。AI research では
+ドロップダウンで論文を選び、チャットの前に固定形式の論文ガイドを生成します。アップロード PDF、論文 URL / DOI、
+抄録とメタデータの順に利用し、英語と表示言語で問題、手法、貢献、全体像、簡単な例を説明します。ガイド生成後だけ
+会話履歴付きの追加質問が表示されます。任意基準またはモデル提案 taxonomy による全体分類も JSON、CSV、Markdown で保存できます。
 AI 出力は必ず原論文で確認し、処理許可のある PDF だけをアップロードしてください。
 
 ### 4. 保存場所
@@ -1068,7 +1104,9 @@ sh start.sh
 <http://localhost:8501>을 엽니다. 최초 실행 시 폴더 안에 전용 `uv`, Python 및 의존성을 설치하며
 시스템 Python은 변경하지 않습니다. 종료하려면 실행 터미널 또는 명령 창을 닫으세요. Streamlit
 개발자 단축키는 비활성화되어 브라우저 복사 기능을 방해하지 않습니다. `uv`가 이미 있다면
-`uv sync --no-dev`와 `uv run vnn-survey-app`을 사용할 수 있습니다. Docker는
+`uv sync --no-dev`와 `uv run vnn-survey-app`을 사용할 수 있습니다.
+관리자가 `make package`를 실행하면 실행 가능한 `dist/`와 ZIP이 함께 갱신되며, 기존 프로젝트,
+백업, 저장된 key 및 가상 환경은 유지됩니다. Docker는
 `docker compose up --build`로 시작하고 `docker compose down`으로 종료합니다.
 
 ### 3. 각 페이지
@@ -1178,11 +1216,20 @@ review queue에 들어오지 않았다는 뜻이며 완전성을 증명하지 �
 실패한 알려진 논문이나 추가 seed는 제목으로 메타데이터를 확인한 뒤 그 논문만 실행할 수 있습니다.
 일반 회차와 같은 fallback, checkpoint, coverage report와 중복 제거를 사용하며 이미 검토한 target 자체는 다시 나타나지 않습니다.
 
+**Snowball round history**에서는 완료되었거나 중단된 회차를 선택해 seed, 신규 논문,
+backward/forward 수, 선별 단계, 사람 결정, 인용 범위와 다운로드 파일을 확인할 수 있습니다.
+선택한 회차를 삭제하면 이에 의존하는 이후 회차도 함께 삭제되지만 0회차는 유지됩니다. 삭제 전에는
+API 키와 다시 만들 수 있는 캐시를 제외한 현재 프로젝트의 가져오기 가능한 ZIP을 자동 생성합니다.
+삭제 후에는 누적 검토를 다시 만들고 제거된 회차에 의존한 기존 최종 내보내기를 무효화합니다.
+
 #### 3.8 Results and AI research
 
 Results는 included corpus, complete audit, Markdown report를 만들고 연도와 venue type 분포를 표시합니다.
-rank / IF 공란은 알 수 없는 값이며 표시할 IF가 모두 없으면 해당 열을 숨깁니다. AI research에서는 최종 논문의 PDF를 대화 기억과 함께 질문하거나,
-사용자 기준 또는 모델이 제안한 taxonomy로 전체 문헌을 분류해 JSON, CSV, Markdown으로 저장할 수 있습니다.
+rank / IF 공란은 알 수 없는 값이며 표시할 IF가 모두 없으면 해당 열을 숨깁니다. AI research에서는 드롭다운으로
+논문을 선택하고 채팅 전에 고정 형식의 논문 해설을 생성합니다. 업로드 PDF, 논문 URL / DOI, 초록과 메타데이터 순으로
+자료를 사용하며 영어와 인터페이스 언어로 문제, 방법, 기여, 전체 이야기와 간단한 예를 설명합니다. 해설이 생성된 뒤에만
+대화 기록이 있는 후속 질문이 표시됩니다. 사용자 기준 또는 모델이 제안한 taxonomy를 이용한 전체 분류도 JSON, CSV,
+Markdown으로 저장할 수 있습니다.
 AI 결과는 원문으로 검증하고 처리 권한이 있는 PDF만 업로드하세요.
 
 ### 4. 저장 위치

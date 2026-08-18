@@ -21,7 +21,7 @@ help:
 	@printf "Targets:\n"
 	@printf "  make setup             Install/update the uv environment.\n"
 	@printf "  make app               Start the local SurveyFlow graphical application.\n"
-	@printf "  make package           Build the quick-start ZIP archive.\n"
+	@printf "  make package           Refresh runnable dist/ and build the quick-start ZIP.\n"
 	@printf "  make queries           Preview generated DBLP queries.\n"
 	@printf "  make pipeline          Run the full pipeline, including OpenAI LLM screening.\n"
 	@printf "  make pipeline-no-llm   Run collection, screening, and abstract enrichment only.\n"

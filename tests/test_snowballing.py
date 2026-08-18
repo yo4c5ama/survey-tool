@@ -128,6 +128,13 @@ def test_snowball_summary_records_complete_seed_coverage(
     with input_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["title", "year", "doi"])
         writer.writeheader()
+        writer.writerow(
+            {
+                "title": "Previously Collected Paper",
+                "year": "2024",
+                "doi": "10.1/previous",
+            }
+        )
     seed_path = tmp_path / "seeds.yaml"
     seed_path.write_text(
         yaml.safe_dump({"seed_papers": [{"title": "Seed Paper"}]}),
@@ -174,6 +181,7 @@ def test_snowball_summary_records_complete_seed_coverage(
 
     monkeypatch.setattr("vnn_survey.snowballing.OpenAlexSnowballClient", FakeClient)
     output_path = tmp_path / "snowballed.csv"
+    progress_counts: list[int] = []
     result = snowball_candidates(
         input_path,
         output_path,
@@ -181,6 +189,9 @@ def test_snowball_summary_records_complete_seed_coverage(
         seed_papers_path=seed_path,
         max_backward_per_seed=0,
         max_forward_per_seed=0,
+        progress_callback=lambda _completed, _total, _current, paper_count: (
+            progress_counts.append(paper_count)
+        ),
     )
 
     assert limits == [(None, None)]
@@ -192,6 +203,7 @@ def test_snowball_summary_records_complete_seed_coverage(
     assert result.summary.backward_truncated_seeds == 0
     assert result.summary.forward_truncated_seeds == 0
     assert result.summary.added_rows == 4
+    assert progress_counts == [1, 5]
 
     summary_path = tmp_path / "snowballing_summary.json"
     write_snowballing_summary(result.summary, summary_path)

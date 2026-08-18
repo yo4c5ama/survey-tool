@@ -1,4 +1,6 @@
+import csv
 from math import nan
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -11,6 +13,7 @@ from vnn_survey.app.main import (
     _looks_like_pdf_url,
     _paper_external_url,
     _paper_metadata,
+    _snowball_direction_counts,
 )
 
 
@@ -25,6 +28,28 @@ def test_download_button_does_not_rerun_the_app(monkeypatch) -> None:
 
     assert _download_button("Download", data=b"content", on_click="rerun")
     assert captured["on_click"] == "ignore"
+
+
+def test_snowball_direction_counts_include_bidirectional_overlap(tmp_path: Path) -> None:
+    path = tmp_path / "snowball_new.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["title", "snowball_relations"])
+        writer.writeheader()
+        writer.writerows(
+            [
+                {"title": "Reference", "snowball_relations": "backward"},
+                {"title": "Citation", "snowball_relations": "forward"},
+                {"title": "Both", "snowball_relations": "backward; forward"},
+                {"title": "Target seed", "snowball_relations": "seed"},
+            ]
+        )
+
+    assert _snowball_direction_counts({"files": {"snowball_new": str(path)}}) == {
+        "new": 4,
+        "backward": 2,
+        "forward": 2,
+        "both": 1,
+    }
 
 
 def test_paper_metadata_formats_numeric_year_and_metrics() -> None:

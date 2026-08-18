@@ -50,8 +50,17 @@ def create_projects_backup(
     include_secrets: bool = False,
     include_caches: bool = False,
     output_dir: Path | None = None,
+    project_slugs: list[str] | None = None,
 ) -> BackupResult:
     projects = store.list_projects()
+    if project_slugs is not None:
+        requested = set(project_slugs)
+        projects = [project for project in projects if project.slug in requested]
+        missing = requested - {project.slug for project in projects}
+        if missing:
+            raise ProjectTransferError(
+                f"Unknown project(s): {', '.join(sorted(missing))}."
+            )
     if not projects:
         raise ProjectTransferError("Create at least one project before exporting a backup.")
 

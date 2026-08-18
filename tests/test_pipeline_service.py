@@ -1,6 +1,7 @@
 import csv
 import json
 import shutil
+import zipfile
 from collections import Counter
 from pathlib import Path
 from threading import Event
@@ -10,23 +11,43 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+import vnn_survey.app.pipeline_service as pipeline_service_module
 from vnn_survey.ai_research import CorpusAnalysisResult
-from vnn_survey.app.audit import load_audit
+from vnn_survey.app.audit import load_audit, read_csv
 from vnn_survey.app.pipeline_service import (
     AI_REVIEW_STAGES,
     SNOWBALL_STAGES,
     PipelineService,
+    _csv_unique_paper_count,
     _with_prompt_replay_stage,
     _with_title_screening_stage,
+    _write_json,
     _write_incremental_snowball_candidates,
 )
 from vnn_survey.app.project_store import KeywordGroup, ProjectStore
+from vnn_survey.app.project_transfer import import_projects_backup
 from vnn_survey.app.task_manager import TaskCancelled, TaskManager, raise_if_cancelled
 from vnn_survey.llm_screening import LlmScreeningResult, LlmScreeningSummary
 from vnn_survey.models import PaperRecord
 from vnn_survey.pipeline import CollectionResult
 from vnn_survey.snowballing import SnowballingResult, SnowballingSummary
 from vnn_survey.title_screening import TitleScreeningResult, TitleScreeningSummary
+
+
+def test_unique_paper_count_preserves_aliases_from_duplicate_rows(tmp_path: Path) -> None:
+    path = tmp_path / "aliases.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["title", "year", "doi"])
+        writer.writeheader()
+        writer.writerows(
+            [
+                {"title": "Shared Title", "year": "2024", "doi": ""},
+                {"title": "Shared Title", "year": "2025", "doi": "10.1/bridge"},
+                {"title": "Published Title", "year": "2025", "doi": "10.1/bridge"},
+            ]
+        )
+
+    assert _csv_unique_paper_count(path) == 1
 
 
 def test_human_only_round_preparation_and_export(tmp_path: Path) -> None:
@@ -422,8 +443,19 @@ def test_snowball_uses_only_latest_review_round_includes_as_seeds(
     store.set_current_run(project.slug, run_id)
     service._save_state(project.slug, state)
     captured_seeds: list[dict[str, str]] = []
+    initial_progress_counts: list[int] = []
 
-    def capture_seeds(*_args, seed_papers_path, **_kwargs):
+    def capture_seeds(*_args, seed_papers_path, **kwargs):
+        progress = service.load_current_state(project.slug)["progress"]
+        initial_progress_counts.append(int(progress["paper_count"]))
+        kwargs["progress_callback"](0, 1, "", 3)
+        initial_progress_counts.append(
+            int(service.load_current_state(project.slug)["progress"]["paper_count"])
+        )
+        kwargs["progress_callback"](1, 1, "Newest Included Seed", 8)
+        initial_progress_counts.append(
+            int(service.load_current_state(project.slug)["progress"]["paper_count"])
+        )
         payload = yaml.safe_load(Path(seed_papers_path).read_text(encoding="utf-8"))
         captured_seeds.extend(payload["seed_papers"])
         raise RuntimeError("stop after seed capture")
@@ -441,6 +473,7 @@ def test_snowball_uses_only_latest_review_round_includes_as_seeds(
         )
 
     assert [seed["title"] for seed in captured_seeds] == ["Newest Included Seed"]
+    assert initial_progress_counts == [0, 0, 5]
 
 
 def test_single_paper_snowball_exports_only_the_selected_target(
@@ -586,6 +619,311 @@ def test_every_saved_state_updates_the_exportable_run_log(tmp_path: Path) -> Non
         "running",
         "completed",
     ]
+
+
+def test_atomic_json_write_retries_transient_windows_file_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text('{"status": "old"}', encoding="utf-8")
+    original_replace = pipeline_service_module.os.replace
+    attempts = 0
+
+    def flaky_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            error = PermissionError(13, "Access is denied", str(destination))
+            error.winerror = 5
+            raise error
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(pipeline_service_module.os, "replace", flaky_replace)
+    monkeypatch.setattr(pipeline_service_module, "sleep", lambda _seconds: None)
+
+    _write_json(path, {"status": "new"})
+
+    assert attempts == 3
+    assert json.loads(path.read_text(encoding="utf-8")) == {"status": "new"}
+    assert not list(tmp_path.glob(".state.json.*.tmp"))
+
+
+def test_run_log_write_failure_does_not_abort_state_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
+    project = store.create_project(
+        name="Locked run log",
+        research_question="Which papers?",
+        scope_description="Test an auxiliary Windows file lock.",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    service = PipelineService(store)
+    state = {
+        "project_slug": project.slug,
+        "run_id": "locked-log-run",
+        "status": "running_discovery",
+        "rounds": [
+            {
+                "index": 0,
+                "kind": "initial",
+                "status": "running",
+                "files": {},
+                "counts": {},
+                "flow": [],
+                "error": "",
+            }
+        ],
+    }
+
+    def locked_log(*_args, **_kwargs):
+        error = PermissionError(13, "Access is denied", "run_log.json")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(pipeline_service_module, "_write_run_log", locked_log)
+
+    service._save_state(project.slug, state)
+
+    persisted = json.loads(
+        (
+            store.project_dir(project.slug)
+            / "runs"
+            / state["run_id"]
+            / "state.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert persisted["status"] == "running_discovery"
+    assert persisted["rounds"][0]["status"] == "running"
+    assert (
+        store.project_dir(project.slug)
+        / "runs"
+        / state["run_id"]
+        / "flow_summary.json"
+    ).exists()
+
+
+def test_delete_snowball_round_cascades_and_creates_restorable_backup(
+    tmp_path: Path,
+) -> None:
+    store = ProjectStore(tmp_path / "projects", tmp_path / "secrets")
+    project = store.create_project(
+        name="Round deletion",
+        research_question="Which papers?",
+        scope_description="Test round history deletion.",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["verification"])],
+    )
+    store.create_project(
+        name="Unrelated project",
+        research_question="What else?",
+        scope_description="Must not enter the automatic backup.",
+        year_start=2020,
+        year_end=2026,
+        keyword_groups=[KeywordGroup("topic", ["testing"])],
+    )
+    service = PipelineService(store)
+    run_id = "round-deletion-run"
+    project_dir = store.project_dir(project.slug)
+    processed = project_dir / "runs" / run_id / "processed"
+    audit_dir = project_dir / "audits" / run_id
+    seed_dir = project_dir / "seeds"
+    processed.mkdir(parents=True)
+    audit_dir.mkdir(parents=True)
+    seed_dir.mkdir(parents=True, exist_ok=True)
+
+    fields = ["title", "year", "doi", "manual_decision", "manual_notes"]
+
+    def write_rows(path: Path, rows: list[dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    round_0_audit = audit_dir / "round_0.csv"
+    round_1_audit = audit_dir / "round_1.csv"
+    round_2_audit = audit_dir / "round_2.csv"
+    write_rows(
+        round_0_audit,
+        [
+            {
+                "title": "Initial included paper",
+                "year": "2023",
+                "doi": "10.1/initial",
+                "manual_decision": "include",
+                "manual_notes": "Keep",
+            }
+        ],
+    )
+    write_rows(
+        round_1_audit,
+        [
+            {
+                "title": "First snowball paper",
+                "year": "2024",
+                "doi": "10.1/round-1",
+                "manual_decision": "include",
+                "manual_notes": "Keep",
+            }
+        ],
+    )
+    write_rows(
+        round_2_audit,
+        [
+            {
+                "title": "Second snowball paper",
+                "year": "2025",
+                "doi": "10.1/round-2",
+                "manual_decision": "",
+                "manual_notes": "",
+            }
+        ],
+    )
+    initial_candidates = processed / "candidate_papers.csv"
+    round_1_new = processed / "candidate_papers_snowball_new_round_1.csv"
+    round_2_new = processed / "candidate_papers_snowball_new_round_2.csv"
+    write_rows(initial_candidates, [])
+    write_rows(round_1_new, [])
+    write_rows(round_2_new, [])
+    round_1_summary = processed / "snowballing_round_1_summary.json"
+    round_2_summary = processed / "snowballing_round_2_summary.json"
+    round_1_summary.write_text("{}", encoding="utf-8")
+    round_2_summary.write_text("{}", encoding="utf-8")
+    round_1_seed = seed_dir / f"{run_id}_round_1.yaml"
+    round_2_seed = seed_dir / f"{run_id}_round_2.yaml"
+    round_1_seed.write_text("papers: []\n", encoding="utf-8")
+    round_2_seed.write_text("papers: []\n", encoding="utf-8")
+    manual_round_2 = project_dir / "runs" / run_id / "manual_enrichment" / "round_2"
+    manual_round_2.mkdir(parents=True)
+    (manual_round_2 / "manual_enriched.csv").write_text("title\nPaper\n", encoding="utf-8")
+
+    export_path = project_dir / "exports" / run_id / "final_included_papers.csv"
+    analysis_path = project_dir / "analysis" / run_id / "analysis-1" / "report.md"
+    export_path.parent.mkdir(parents=True)
+    analysis_path.parent.mkdir(parents=True)
+    export_path.write_text("title\nOld export\n", encoding="utf-8")
+    analysis_path.write_text("Old analysis", encoding="utf-8")
+    approved_prompt = project_dir / "configs" / "prompts" / "approved_prompt.txt"
+    approved_prompt.parent.mkdir(parents=True, exist_ok=True)
+    approved_prompt.write_text("Approved prompt\n", encoding="utf-8")
+
+    state = {
+        "project_slug": project.slug,
+        "run_id": run_id,
+        "status": "awaiting_manual_review",
+        "rounds": [
+            {
+                "index": 0,
+                "kind": "initial",
+                "status": "ready_for_review",
+                "files": {
+                    "candidates": str(initial_candidates),
+                    "audit": str(round_0_audit),
+                },
+                "counts": {"deduped_records": 1, "audit_queue": 1},
+                "flow": [],
+            },
+            {
+                "index": 1,
+                "kind": "snowball",
+                "status": "ready_for_review",
+                "files": {
+                    "snowball_new": str(round_1_new),
+                    "seeds": str(round_1_seed),
+                    "audit": str(round_1_audit),
+                },
+                "counts": {"pool_rows": 1, "audit_queue": 1},
+                "flow": [],
+            },
+            {
+                "index": 2,
+                "kind": "snowball",
+                "status": "ready_for_review",
+                "files": {
+                    "snowball_new": str(round_2_new),
+                    "seeds": str(round_2_seed),
+                    "audit": str(round_2_audit),
+                },
+                "counts": {"pool_rows": 1, "audit_queue": 1},
+                "flow": [],
+            },
+        ],
+        "prompt_refinement": {
+            "refinement_id": "refined-prompt",
+            "status": "approved",
+            "source_round": 1,
+            "source_rounds": [0, 1],
+            "approved_prompt_path": str(approved_prompt),
+            "approved_at": "2026-01-01T00:00:00",
+            "replay_status": "completed",
+        },
+        "prompt_replay": {
+            "status": "completed",
+            "refinement_id": "old-prompt",
+            "approved_prompt_path": str(approved_prompt),
+            "replay_round": 1,
+            "replayed": 10,
+            "recovered": 2,
+        },
+        "exports": {"included": str(export_path)},
+        "corpus_analysis": {"report": str(analysis_path)},
+    }
+    store.set_current_run(project.slug, run_id)
+    service._save_state(project.slug, state)
+
+    result = service.delete_snowball_round(project.slug, 1)
+    persisted = service.load_current_state(project.slug)
+
+    assert result["deleted_rounds"] == [1, 2]
+    assert result["latest_round"] == 0
+    assert result["cleanup_failures"] == []
+    assert [item["index"] for item in persisted["rounds"]] == [0]
+    assert persisted["status"] == "awaiting_manual_review"
+    assert persisted["progress"]["stage"] == "Round deletion complete"
+    assert persisted["prompt_replay"]["status"] == "pending"
+    assert persisted["prompt_replay"]["refinement_id"] == "refined-prompt"
+    assert persisted["prompt_refinement"]["source_data_stale"] is True
+    assert "exports" not in persisted
+    assert "corpus_analysis" not in persisted
+    assert initial_candidates.exists()
+    assert round_0_audit.exists()
+    assert not round_1_audit.exists()
+    assert not round_2_audit.exists()
+    assert not round_1_new.exists()
+    assert not round_2_new.exists()
+    assert not round_1_summary.exists()
+    assert not round_2_summary.exists()
+    assert not round_1_seed.exists()
+    assert not round_2_seed.exists()
+    assert not manual_round_2.exists()
+    assert not export_path.exists()
+    assert not analysis_path.exists()
+
+    _, cumulative_rows = read_csv(audit_dir / "cumulative.csv")
+    _, included_rows = read_csv(audit_dir / "included.csv")
+    assert [row["title"] for row in cumulative_rows] == ["Initial included paper"]
+    assert [row["title"] for row in included_rows] == ["Initial included paper"]
+
+    backup_path = Path(result["backup_path"])
+    assert backup_path.exists()
+    with zipfile.ZipFile(backup_path) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        names = set(archive.namelist())
+    assert manifest["project_count"] == 1
+    assert manifest["projects"] == [{"slug": project.slug, "name": project.name}]
+    assert f"projects/{project.slug}/audits/{run_id}/round_2.csv" in names
+
+    restored = ProjectStore(tmp_path / "restored" / "projects", tmp_path / "restored" / "secrets")
+    imported = import_projects_backup(restored, backup_path)
+    assert imported.imported == (project.slug,)
+    restored_state = PipelineService(restored).load_current_state(project.slug)
+    assert [item["index"] for item in restored_state["rounds"]] == [0, 1, 2]
 
 
 def test_incremental_snowball_candidates_exclude_every_previously_seen_paper(
@@ -965,11 +1303,14 @@ def test_cancelled_initial_discovery_resumes_same_run_from_saved_venue(
     run_id = stopped["run_id"]
     assert stopped["status"] == "cancelled"
     assert Path(stopped["rounds"][0]["files"]["venues"]).exists()
+    stopped["rounds"][0]["error"] = "stale error from the interrupted attempt"
+    service._save_state(project.slug, stopped)
 
     resumed = service.resume_initial_discovery(project.slug)
 
     assert resumed["run_id"] == run_id
     assert resumed["status"] == "awaiting_ai_or_review"
+    assert resumed["rounds"][0]["error"] == ""
     assert collect_calls == 1
     assert enrichment_calls == 2
     assert [stage["key"] for stage in resumed["rounds"][0]["flow"]][-1] == ("abstract_enrichment")

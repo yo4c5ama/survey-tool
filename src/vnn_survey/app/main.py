@@ -16,7 +16,7 @@ from vnn_survey.ai_research import (
     PaperWorkspace,
     estimate_corpus_requests,
 )
-from vnn_survey.app.audit import AuditSummary, load_audit
+from vnn_survey.app.audit import AuditSummary, load_audit, read_csv
 from vnn_survey.app.i18n import LANGUAGE_NAMES, language_name, translate
 from vnn_survey.app.manual_papers import ManualPaperStore, create_manual_record
 from vnn_survey.app.pipeline_service import (
@@ -68,8 +68,9 @@ PAGE_DESCRIPTIONS = {
         "Inspect the reviewed corpus and export the evidence needed for a reproducible survey."
     ),
     "ai_research": (
-        "Study individual papers with their PDFs or classify the final reviewed corpus. "
-        "AI output remains an analytical aid and should be checked by the researcher."
+        "Generate a clear bilingual briefing for each paper, then ask follow-up questions or "
+        "classify the final reviewed corpus. AI output remains an analytical aid and should be "
+        "checked by the researcher."
     ),
 }
 
@@ -782,11 +783,13 @@ def _render_ai_model_settings(store: ProjectStore, project: ProjectSettings) -> 
         model_columns = st.columns(2)
         with model_columns[0]:
             paper_model = _render_model_selector(
-                _t("Paper Q&A model"),
+                _t("Paper analysis and Q&A model"),
                 project.paper_qa_model,
                 key=f"ai_paper_model_{project.slug}",
                 fetched_models=fetched_models,
-                help_text=_t("Used for questions about an uploaded paper PDF."),
+                help_text=_t(
+                    "Used to generate the first paper briefing and answer follow-up questions."
+                ),
             )
         with model_columns[1]:
             corpus_model = _render_model_selector(
@@ -2041,6 +2044,13 @@ def _render_prompt_refinement_content(
     refinement = overview.get("refinement", {})
     status = str(refinement.get("status") or "not_generated")
     has_api_key = store.has_api_key(project.slug) or bool(os.environ.get("OPENAI_API_KEY"))
+    if refinement.get("source_data_stale"):
+        st.warning(
+            _t(
+                "This prompt used an audit round that was later deleted. The approved prompt "
+                "remains active; generate a new proposal to learn only from retained rounds."
+            )
+        )
     if status == "proposed":
         try:
             proposal = service.load_prompt_refinement_proposal(project.slug)
@@ -2202,100 +2212,18 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
     state_metrics[2].metric(
         _t("Review queue"), latest_state_round.get("counts", {}).get("audit_queue", 0)
     )
-    with st.expander(_t("Show round history")):
-        _render_round_overview(state)
+    task = _task_manager().snapshot(project.slug)
+    _render_snowball_round_history(
+        service,
+        project,
+        state,
+        task_running=bool(task and task.running),
+    )
     _render_run_log_download(
         service,
         project.slug,
         key=f"snowball_run_log_{state['run_id']}",
     )
-    latest_snowball = next(
-        (item for item in reversed(state.get("rounds", [])) if item.get("kind") == "snowball"),
-        None,
-    )
-    if latest_snowball:
-        provider_successes = latest_snowball.get("counts", {}).get(
-            "provider_successes",
-            {},
-        )
-        provider_failures = latest_snowball.get("counts", {}).get(
-            "provider_failures",
-            {},
-        )
-        providers = latest_snowball.get("counts", {}).get(
-            "citation_providers",
-            [],
-        )
-        if isinstance(providers, list) and providers:
-            activity = "; ".join(
-                _t(
-                    "{provider}: {successes} successful calls, {failures} failures",
-                    provider=SNOWBALL_PROVIDER_LABELS.get(provider, provider),
-                    successes=(
-                        provider_successes.get(provider, 0)
-                        if isinstance(provider_successes, dict)
-                        else 0
-                    ),
-                    failures=(
-                        provider_failures.get(provider, 0)
-                        if isinstance(provider_failures, dict)
-                        else 0
-                    ),
-                )
-                for provider in providers
-            )
-            st.caption(_t("Provider activity: {details}", details=activity))
-            if isinstance(provider_failures, dict) and sum(
-                int(value or 0) for value in provider_failures.values()
-            ):
-                st.warning(
-                    _t(
-                        "Some citation-provider requests failed. The successful results remain "
-                        "valid, affected seed papers are marked, and this round can continue "
-                        "to screening and manual review."
-                    )
-                )
-        coverage_path_value = latest_snowball.get("files", {}).get("seed_coverage")
-        if coverage_path_value and Path(coverage_path_value).exists():
-            coverage_frame = pd.read_csv(coverage_path_value, keep_default_na=False)
-            issue_frame = (
-                coverage_frame[coverage_frame["coverage_status"] != "complete"]
-                if "coverage_status" in coverage_frame
-                else coverage_frame.iloc[0:0]
-            )
-            if not issue_frame.empty:
-                with st.expander(
-                    _t(
-                        "Citation coverage warnings ({count} seed papers)",
-                        count=len(issue_frame),
-                    ),
-                    expanded=True,
-                ):
-                    display_columns = [
-                        column
-                        for column in [
-                            "seed_title",
-                            "coverage_status",
-                            "missing_providers",
-                            "provider_errors",
-                            "references_fetched",
-                            "citations_fetched",
-                        ]
-                        if column in issue_frame.columns
-                    ]
-                    st.dataframe(
-                        issue_frame[display_columns],
-                        hide_index=True,
-                        width="stretch",
-                    )
-                    _download_button(
-                        _t("Download seed coverage report"),
-                        data=Path(coverage_path_value).read_bytes(),
-                        file_name=Path(coverage_path_value).name,
-                        mime="text/csv",
-                        icon=":material/download:",
-                    )
-    task = _task_manager().snapshot(project.slug)
     if task and task.running and task.operation in {
         "snowball_discovery",
         "targeted_snowball_discovery",
@@ -2478,6 +2406,289 @@ def _render_snowball(service: PipelineService, project: ProjectSettings) -> None
             project,
             embedded=True,
         )
+
+
+def _render_snowball_round_history(
+    service: PipelineService,
+    project: ProjectSettings,
+    state: dict[str, Any],
+    *,
+    task_running: bool,
+) -> None:
+    feedback_key = f"snowball_round_deletion_{project.slug}"
+    feedback = st.session_state.get(feedback_key)
+    with st.container(border=True):
+        st.subheader(_t("Snowball round history"))
+        if isinstance(feedback, dict):
+            deleted = ", ".join(str(value) for value in feedback.get("deleted_rounds", []))
+            st.success(
+                _t(
+                    "Deleted round(s) {rounds}. The project now ends at round {latest_round}.",
+                    rounds=deleted,
+                    latest_round=feedback.get("latest_round", 0),
+                )
+            )
+            backup_value = feedback.get("backup_path")
+            backup_path = Path(backup_value) if backup_value else None
+            if backup_path and backup_path.exists():
+                with backup_path.open("rb") as handle:
+                    _download_button(
+                        _t("Download pre-deletion project backup"),
+                        data=handle,
+                        file_name=backup_path.name,
+                        mime="application/zip",
+                        icon=":material/download:",
+                        key=f"round_deletion_backup_{project.slug}_{backup_path.name}",
+                    )
+            failures = feedback.get("cleanup_failures")
+            if isinstance(failures, list) and failures:
+                st.warning(
+                    _t(
+                        "The round was removed from project history, but {count} obsolete "
+                        "artifact(s) could not be deleted. They are no longer used.",
+                        count=len(failures),
+                    )
+                )
+
+        snowball_rounds = [
+            item for item in state.get("rounds", []) if item.get("kind") == "snowball"
+        ]
+        if not snowball_rounds:
+            st.caption(_t("No snowball rounds have been created yet."))
+            return
+
+        by_index = {int(item.get("index", 0)): item for item in snowball_rounds}
+        round_indices = sorted(by_index)
+        selector_key = f"snowball_history_round_{state['run_id']}"
+        if st.session_state.get(selector_key) not in round_indices:
+            st.session_state[selector_key] = round_indices[-1]
+        selected_index = st.selectbox(
+            _t("Select a snowball round"),
+            round_indices,
+            key=selector_key,
+            format_func=lambda value: _t(
+                "Round {round_index} · {mode} · {status}",
+                round_index=value,
+                mode=_state_label(by_index[value].get("snowball_mode") or "incremental"),
+                status=_state_label(by_index[value].get("status") or "unknown"),
+            ),
+        )
+        selected_round = by_index[int(selected_index)]
+        _render_snowball_round_details(state, selected_round)
+
+        st.divider()
+        with st.expander(_t("Delete selected round")):
+            affected = [index for index in round_indices if index >= int(selected_index)]
+            st.warning(
+                _t(
+                    "Deleting round {round_index} also deletes every later dependent round: "
+                    "{rounds}. Round 0 and its manual review are retained.",
+                    round_index=selected_index,
+                    rounds=", ".join(str(value) for value in affected),
+                )
+            )
+            st.caption(
+                _t(
+                    "A restorable backup of the current project is created automatically "
+                    "before deletion. API keys and rebuildable caches are not included."
+                )
+            )
+            confirmed = st.checkbox(
+                _t("I understand that the selected and later rounds will be deleted."),
+                key=f"confirm_snowball_delete_{state['run_id']}_{selected_index}",
+            )
+            if st.button(
+                _t("Delete round {round_index} and later", round_index=selected_index),
+                icon=":material/delete:",
+                disabled=task_running or not confirmed,
+                key=f"delete_snowball_round_{state['run_id']}_{selected_index}",
+            ):
+                try:
+                    result = service.delete_snowball_round(
+                        project.slug,
+                        int(selected_index),
+                    )
+                except (OSError, ProjectTransferError, RuntimeError, ValueError) as exc:
+                    st.error(_runtime_text(str(exc)))
+                else:
+                    st.session_state[feedback_key] = {
+                        **result,
+                        "backup_path": str(result["backup_path"]),
+                    }
+                    st.rerun()
+
+
+def _render_snowball_round_details(
+    state: dict[str, Any],
+    round_state: dict[str, Any],
+) -> None:
+    counts = round_state.get("counts", {})
+    files = round_state.get("files", {})
+    direction_counts = _snowball_direction_counts(round_state)
+    new_path_value = files.get("snowball_new")
+    new_path = Path(new_path_value) if new_path_value else None
+    if not (new_path and new_path.exists()):
+        direction_counts["new"] = max(int(counts.get("added_rows") or 0), 0)
+
+    overview = st.columns(4)
+    overview[0].metric(_t("Seeds"), counts.get("seeds", 0))
+    overview[1].metric(_t("New papers"), direction_counts["new"])
+    overview[2].metric(_t("Review queue"), counts.get("audit_queue", 0))
+    overview[3].metric(_t("Status"), _state_label(round_state.get("status") or "unknown"))
+
+    direction = st.columns(3)
+    direction[0].metric(_t("Papers cited by seeds"), direction_counts["backward"])
+    direction[1].metric(_t("Papers citing seeds"), direction_counts["forward"])
+    direction[2].metric(_t("Both directions"), direction_counts["both"])
+    st.caption(_t("Direction counts are measured before title and abstract screening."))
+
+    target_title = counts.get("target_seed_title")
+    if target_title:
+        st.caption(_t("Target paper: {title}", title=target_title))
+
+    stages = round_flow_stages(round_state)
+    if stages:
+        st.markdown(f"**{_t('Screening stages')}**")
+        stage_rows = [
+            {
+                _t("Stage"): _t(str(stage.get("label") or "")),
+                _t("Input"): int(stage.get("input") or 0),
+                _t("Retained"): int(stage.get("retained") or 0),
+                _t("Excluded"): int(stage.get("excluded") or 0),
+            }
+            for stage in stages
+        ]
+        st.dataframe(pd.DataFrame(stage_rows), hide_index=True, width="stretch")
+
+    audit_summary: AuditSummary | None = None
+    audit_value = files.get("audit")
+    audit_path = Path(audit_value) if audit_value else None
+    if audit_path and audit_path.exists():
+        _, _, audit_summary = load_audit(audit_path)
+        st.markdown(f"**{_t('Manual decisions')}**")
+        audit_metrics = st.columns(4)
+        audit_metrics[0].metric(_t("Include"), audit_summary.by_decision.get("include", 0))
+        audit_metrics[1].metric(
+            _t("Related"), audit_summary.by_decision.get("include_related", 0)
+        )
+        audit_metrics[2].metric(_t("Exclude"), audit_summary.by_decision.get("exclude", 0))
+        audit_metrics[3].metric(_t("Pending"), audit_summary.unreviewed)
+    else:
+        st.caption(_t("This round does not have a manual review queue yet."))
+
+    st.markdown(f"**{_t('Citation coverage')}**")
+    coverage = st.columns(3)
+    coverage[0].metric(_t("Complete"), counts.get("coverage_complete_seeds", 0))
+    coverage[1].metric(_t("Partial"), counts.get("coverage_partial_seeds", 0))
+    coverage[2].metric(_t("Failed"), counts.get("coverage_failed_seeds", 0))
+    providers = counts.get("citation_providers", [])
+    provider_successes = counts.get("provider_successes", {})
+    provider_failures = counts.get("provider_failures", {})
+    if isinstance(providers, list) and providers:
+        activity = "; ".join(
+            _t(
+                "{provider}: {successes} successful calls, {failures} failures",
+                provider=SNOWBALL_PROVIDER_LABELS.get(provider, provider),
+                successes=(
+                    provider_successes.get(provider, 0)
+                    if isinstance(provider_successes, dict)
+                    else 0
+                ),
+                failures=(
+                    provider_failures.get(provider, 0)
+                    if isinstance(provider_failures, dict)
+                    else 0
+                ),
+            )
+            for provider in providers
+        )
+        st.caption(_t("Provider activity: {details}", details=activity))
+    if isinstance(provider_failures, dict) and sum(
+        int(value or 0) for value in provider_failures.values()
+    ):
+        st.warning(
+            _t(
+                "Some citation-provider requests failed. The successful results remain valid, "
+                "and affected seed papers are identified in the coverage report."
+            )
+        )
+
+    coverage_value = files.get("seed_coverage")
+    coverage_path = Path(coverage_value) if coverage_value else None
+    if coverage_path and coverage_path.exists():
+        try:
+            coverage_frame = pd.read_csv(coverage_path, keep_default_na=False)
+        except (OSError, pd.errors.ParserError):
+            coverage_frame = pd.DataFrame()
+        issue_frame = (
+            coverage_frame[coverage_frame["coverage_status"] != "complete"]
+            if "coverage_status" in coverage_frame
+            else coverage_frame.iloc[0:0]
+        )
+        if not issue_frame.empty:
+            with st.expander(
+                _t("Citation coverage warnings ({count} seed papers)", count=len(issue_frame))
+            ):
+                display_columns = [
+                    column
+                    for column in [
+                        "seed_title",
+                        "coverage_status",
+                        "missing_providers",
+                        "provider_errors",
+                        "references_fetched",
+                        "citations_fetched",
+                    ]
+                    if column in issue_frame.columns
+                ]
+                st.dataframe(issue_frame[display_columns], hide_index=True, width="stretch")
+
+    snapshot = {
+        "run_id": state.get("run_id", ""),
+        "round": round_state,
+        "direction_counts": direction_counts,
+        "manual_review": (
+            {
+                "total": audit_summary.total,
+                "reviewed": audit_summary.reviewed,
+                "pending": audit_summary.unreviewed,
+                "by_decision": dict(audit_summary.by_decision),
+            }
+            if audit_summary
+            else None
+        ),
+    }
+    downloads: list[tuple[str, Path | None, bytes, str]] = [
+        (_t("All new papers CSV"), new_path, b"", "text/csv"),
+        (_t("Manual review CSV"), audit_path, b"", "text/csv"),
+        (_t("Seed coverage CSV"), coverage_path, b"", "text/csv"),
+    ]
+    seed_value = files.get("seeds")
+    seed_path = Path(seed_value) if seed_value else None
+    downloads.append((_t("Seed file"), seed_path, b"", "application/yaml"))
+    snapshot_bytes = (json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    downloads.append((_t("Round snapshot JSON"), None, snapshot_bytes, "application/json"))
+
+    available_downloads = [
+        item for item in downloads if item[2] or (item[1] is not None and item[1].exists())
+    ]
+    if available_downloads:
+        st.markdown(f"**{_t('Round files')}**")
+        download_columns = st.columns(min(3, len(available_downloads)))
+        round_index = int(round_state.get("index", 0))
+        for position, (label, path, content, mime) in enumerate(available_downloads):
+            with download_columns[position % len(download_columns)]:
+                data = content if content else path.read_bytes() if path else b""
+                file_name = path.name if path else f"round_{round_index}_snapshot.json"
+                _download_button(
+                    label,
+                    data=data,
+                    file_name=file_name,
+                    mime=mime,
+                    icon=":material/download:",
+                    width="stretch",
+                    key=f"snowball_history_download_{round_index}_{position}",
+                )
 
 
 def _render_snowball_run_settings(
@@ -2937,14 +3148,14 @@ def _render_ai_research(
     if included.empty:
         st.info(_t("The final included corpus is empty."))
         return
-    paper_tab, corpus_tab = st.tabs([_t("Paper Q&A"), _t("Corpus classification")])
+    paper_tab, corpus_tab = st.tabs([_t("Paper analysis"), _t("Corpus classification")])
     with paper_tab:
-        _render_paper_qa(store, project, included)
+        _render_paper_analysis(store, project, included)
     with corpus_tab:
         _render_corpus_analysis(store, service, project, state, included)
 
 
-def _render_paper_qa(
+def _render_paper_analysis(
     store: ProjectStore,
     project: ProjectSettings,
     included: pd.DataFrame,
@@ -2957,44 +3168,133 @@ def _render_paper_qa(
         key=f"research_paper_{project.slug}",
     )
     paper = {str(key): str(value) for key, value in rows[selected_index].items()}
-    st.markdown(f"### {paper.get('title', '')}")
+    _render_paper_reader_title(paper)
     st.caption(_paper_metadata(paper))
     workspace = PaperWorkspace(store.project_dir(project.slug))
     pdf_path = workspace.pdf_path(paper)
+    paper_id = workspace.paper_id(paper)
+    source_url = _paper_external_url(paper)
+    analysis = workspace.load_analysis(paper)
 
-    upload = st.file_uploader(
-        _t("Paper PDF"),
-        type=["pdf"],
-        key=f"paper_pdf_{project.slug}_{workspace.paper_id(paper)}",
-    )
-    upload_col, status_col = st.columns([1, 2])
-    with upload_col:
+    with st.expander(_t("Source material"), expanded=not bool(analysis)):
+        if pdf_path:
+            st.success(_t("A PDF is available for this paper."))
+        elif source_url:
+            st.info(
+                _t(
+                    "The paper link will be sent to the model together with all saved metadata."
+                )
+            )
+        else:
+            st.warning(
+                _t(
+                    "No PDF or paper link is available. Analysis will use the saved abstract "
+                    "and metadata."
+                )
+            )
+        upload = st.file_uploader(
+            _t("Paper PDF"),
+            type=["pdf"],
+            key=f"paper_pdf_{project.slug}_{paper_id}",
+        )
         if st.button(
             _t("Save PDF"),
-            type="primary",
             icon=":material/upload_file:",
             disabled=upload is None,
-            key=f"save_pdf_{project.slug}_{workspace.paper_id(paper)}",
+            key=f"save_pdf_{project.slug}_{paper_id}",
         ):
             try:
-                pdf_path = workspace.save_pdf(paper, upload.getvalue())
+                workspace.save_pdf(paper, upload.getvalue())
                 st.success(_t("PDF saved for this paper."))
                 st.rerun()
             except ValueError as exc:
                 st.error(_runtime_text(str(exc)))
-    with status_col:
-        if pdf_path:
-            st.success(_t("A PDF is available for this paper."))
-        else:
-            st.info(_t("Upload the paper PDF before asking questions."))
 
     fetched_models = st.session_state.get(f"available_models_{project.slug}", [])
     model = _render_model_selector(
-        _t("Paper Q&A model"),
+        _t("Paper analysis and Q&A model"),
         project.paper_qa_model,
         key=f"paper_qa_model_{project.slug}",
         fetched_models=fetched_models,
     )
+    ui_language = st.session_state.get("ui_language", "en")
+    heading_col, action_col = st.columns([4, 1])
+    with heading_col:
+        st.subheader(_t("AI paper briefing"))
+    with action_col:
+        analyze_clicked = st.button(
+            _t("Regenerate analysis") if analysis else _t("Analyze paper"),
+            type="secondary" if analysis else "primary",
+            icon=":material/auto_awesome:",
+            width="stretch",
+            key=f"analyze_paper_{project.slug}_{paper_id}",
+        )
+    if not analysis:
+        st.caption(
+            _t(
+                "Generate a concise bilingual explanation of the paper before starting a "
+                "conversation."
+            )
+        )
+    if analyze_clicked:
+        api_key = store.read_api_key(project.slug) or os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            st.error(_t("Add an API key on the AI settings page before continuing."))
+            return
+        try:
+            with st.spinner(_t("Reading the paper and preparing its briefing...")):
+                client = OpenAIResearchClient(
+                    base_url=project.llm_base_url,
+                    api_key=api_key,
+                    model=model,
+                )
+                result = client.analyze_paper(
+                    pdf_path=pdf_path,
+                    paper=paper,
+                    output_language=ui_language,
+                    file_id=workspace.file_id(paper),
+                )
+                if result.file_id:
+                    workspace.save_file_id(paper, result.file_id)
+                workspace.save_analysis(
+                    paper,
+                    content=result.content,
+                    model=model,
+                    response_id=result.response_id,
+                    source_kind=result.source_kind,
+                    source_url=result.source_url,
+                    interface_language=ui_language,
+                )
+            st.rerun()
+        except Exception as exc:
+            st.error(_t("Paper analysis failed: {error}", error=str(exc)))
+            return
+
+    if not analysis:
+        return
+
+    st.markdown(analysis.get("content", ""))
+    st.caption(
+        _t(
+            "Generated with {model} · Evidence: {source}",
+            model=analysis.get("model", ""),
+            source=_paper_analysis_source_label(analysis.get("source_kind", "")),
+        )
+    )
+    if analysis.get("interface_language") != ui_language:
+        st.info(_t("Regenerate the briefing to match the current interface language."))
+    if pdf_path and analysis.get("source_kind") != "uploaded_pdf":
+        st.info(_t("A PDF is now available. Regenerate the briefing to use the full paper."))
+    elif source_url and analysis.get("source_kind") == "metadata":
+        st.warning(
+            _t(
+                "The linked source could not be read, so this briefing uses metadata and the "
+                "abstract only."
+            )
+        )
+
+    st.divider()
+    st.subheader(_t("Follow-up questions"))
     conversation = workspace.load_conversation(paper)
     clear_col, memory_col = st.columns([1, 3])
     with clear_col:
@@ -3002,7 +3302,7 @@ def _render_paper_qa(
             _t("Clear conversation"),
             icon=":material/delete_sweep:",
             disabled=not conversation,
-            key=f"clear_conversation_{project.slug}_{workspace.paper_id(paper)}",
+            key=f"clear_conversation_{project.slug}_{paper_id}",
         ):
             workspace.clear_conversation(paper)
             st.rerun()
@@ -3022,8 +3322,7 @@ def _render_paper_qa(
 
     question = st.chat_input(
         _t("Ask a question about this paper"),
-        key=f"paper_question_{project.slug}_{workspace.paper_id(paper)}",
-        disabled=pdf_path is None,
+        key=f"paper_question_{project.slug}_{paper_id}",
     )
     if question:
         api_key = store.read_api_key(project.slug) or os.environ.get("OPENAI_API_KEY", "")
@@ -3031,26 +3330,29 @@ def _render_paper_qa(
             st.error(_t("Add an API key on the AI settings page before continuing."))
             return
         try:
-            with st.spinner(_t("Reading the PDF and preparing an answer...")):
+            with st.spinner(_t("Reading the paper and preparing an answer...")):
                 client = OpenAIResearchClient(
                     base_url=project.llm_base_url,
                     api_key=api_key,
                     model=model,
                 )
-                answer, response_id, file_id = client.ask_pdf(
+                result = client.ask_paper(
                     pdf_path=pdf_path,
                     paper=paper,
                     conversation=conversation,
                     question=question,
+                    initial_analysis=analysis.get("content", ""),
+                    output_language=ui_language,
                     file_id=workspace.file_id(paper),
                 )
-                workspace.save_file_id(paper, file_id)
+                if result.file_id:
+                    workspace.save_file_id(paper, result.file_id)
                 workspace.append_exchange(
                     paper,
                     question=question,
-                    answer=answer,
+                    answer=result.content,
                     model=model,
-                    response_id=response_id,
+                    response_id=result.response_id,
                 )
             st.rerun()
         except Exception as exc:
@@ -3660,7 +3962,7 @@ def _render_current_run_progress_content(
                 st.rerun()
             else:
                 st.warning(_t("The previous task is still stopping. Please wait."))
-    elif progress_status == "cancelled" and operation in {
+    elif progress_status in {"cancelled", "running"} and operation in {
         "Initial discovery",
         "Resume initial discovery",
     }:
@@ -3744,6 +4046,33 @@ def _current_paper_count(state: dict[str, Any]) -> int:
         if value not in (None, ""):
             return max(int(value), 0)
     return 0
+
+
+def _snowball_direction_counts(round_state: dict[str, Any]) -> dict[str, int]:
+    path_value = round_state.get("files", {}).get("snowball_new")
+    if not path_value or not Path(path_value).exists():
+        return {"new": 0, "backward": 0, "forward": 0, "both": 0}
+    _, rows = read_csv(Path(path_value))
+    backward = 0
+    forward = 0
+    both = 0
+    for row in rows:
+        relations = {
+            item.strip().lower()
+            for item in str(row.get("snowball_relations") or "").split(";")
+            if item.strip()
+        }
+        has_backward = "backward" in relations
+        has_forward = "forward" in relations
+        backward += int(has_backward)
+        forward += int(has_forward)
+        both += int(has_backward and has_forward)
+    return {
+        "new": len(rows),
+        "backward": backward,
+        "forward": forward,
+        "both": both,
+    }
 
 
 def _state_label(value: object) -> str:
@@ -3954,6 +4283,17 @@ def _looks_like_pdf_url(url: str) -> bool:
         "download=pdf",
         "format=pdf",
     }
+
+
+def _paper_analysis_source_label(source_kind: str) -> str:
+    return _t(
+        {
+            "uploaded_pdf": "Uploaded PDF",
+            "linked_pdf": "Linked PDF",
+            "linked_page": "Paper page",
+            "metadata": "Abstract and metadata",
+        }.get(source_kind, "Paper information")
+    )
 
 
 def _impact_factor_text(value: Any) -> str:

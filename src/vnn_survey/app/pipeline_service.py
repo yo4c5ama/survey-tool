@@ -3,15 +3,18 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import math
 import os
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from shutil import copy2
+from shutil import copy2, rmtree
 from threading import get_ident
+from time import sleep
 from typing import Any
 
 import requests
@@ -33,6 +36,7 @@ from vnn_survey.app.audit import (
 from vnn_survey.app.audit import write_csv as write_audit_csv
 from vnn_survey.app.manual_papers import ManualPaperStore
 from vnn_survey.app.project_store import ProjectStore
+from vnn_survey.app.project_transfer import create_projects_backup
 from vnn_survey.app.run_flow import build_flow_svg, flow_summary_payload, record_flow_stage
 from vnn_survey.app.task_manager import TaskCancelled, raise_if_cancelled
 from vnn_survey.config import SurveyConfig, load_config
@@ -76,6 +80,8 @@ from vnn_survey.title_screening import (
 from vnn_survey.venue_quality import enrich_venue_quality, write_venue_quality_summary
 
 ProgressCallback = Callable[[str, str, int | None, int | None, str], None]
+LOGGER = logging.getLogger(__name__)
+FILE_REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 INITIAL_DISCOVERY_STAGES = [
     "Literature search",
@@ -513,6 +519,7 @@ class PipelineService:
         enriched_path = processed_dir / "candidate_papers_enriched.csv"
 
         round_state["status"] = "running"
+        round_state["error"] = ""
         state["status"] = "running_discovery"
         tracked_progress = self._begin_progress(
             project_slug,
@@ -1548,6 +1555,11 @@ class PipelineService:
         checkpoint_value = round_state.get("files", {}).get("snowballed")
         if retry_round is not None and checkpoint_value and Path(checkpoint_value).exists():
             snowball_input = Path(checkpoint_value)
+        historical_pool_count = _csv_unique_paper_count(previous_pool)
+        checkpoint_new_count = max(
+            _csv_unique_paper_count(snowball_input) - historical_pool_count,
+            0,
+        )
         tracked_progress = self._begin_progress(
             project_slug,
             state,
@@ -1555,7 +1567,7 @@ class PipelineService:
             heading="Running citation snowballing",
             stages=_with_title_screening_stage(SNOWBALL_STAGES, use_title_llm),
             callback=progress,
-            paper_count=_csv_row_count(snowball_input),
+            paper_count=checkpoint_new_count,
         )
         snowball_path = processed_dir / f"candidate_papers_snowballed_round_{round_index}.csv"
 
@@ -1585,6 +1597,7 @@ class PipelineService:
                     state,
                     "Citation snowballing",
                     "Collecting references and citing works from the selected providers.",
+                    paper_count_baseline=historical_pool_count,
                 ),
             )
             snowball_result = _merge_retry_provider_summary(
@@ -1600,6 +1613,7 @@ class PipelineService:
                 new_candidates_path,
                 prior_paths=[previous_pool, *audit_paths],
             )
+            _set_progress_paper_count(state, round_added_rows)
             write_snowballing_summary(
                 snowball_result.summary,
                 processed_dir / f"snowballing_round_{round_index}_summary.json",
@@ -3024,6 +3038,133 @@ class PipelineService:
         self._save_state(project_slug, state)
         return {"audit": cumulative_path, "included": included_path, "report": report_path}
 
+    def delete_snowball_round(
+        self,
+        project_slug: str,
+        round_index: int,
+    ) -> dict[str, Any]:
+        """Delete one snowball round and every later dependent round."""
+
+        if int(round_index) <= 0:
+            raise ValueError("Only snowball rounds can be deleted from round history.")
+        state = self.load_current_state(project_slug)
+        try:
+            selected_round = _get_round(state, int(round_index))
+        except KeyError as exc:
+            raise ValueError(f"Snowball round {round_index} does not exist.") from exc
+        if selected_round.get("kind") != "snowball":
+            raise ValueError("Only snowball rounds can be deleted from round history.")
+
+        affected_rounds = [
+            item
+            for item in state.get("rounds", [])
+            if int(item.get("index", -1)) >= int(round_index)
+        ]
+        retained_rounds = [
+            item
+            for item in state.get("rounds", [])
+            if int(item.get("index", -1)) < int(round_index)
+        ]
+        if not retained_rounds:
+            raise RuntimeError("The initial discovery round must be retained.")
+
+        project_dir = self.store.project_dir(project_slug)
+        backup = create_projects_backup(
+            self.store,
+            include_secrets=False,
+            include_caches=False,
+            output_dir=self.store.root.parent / "backups" / "round_deletions",
+            project_slugs=[project_slug],
+        )
+        affected_indices = sorted(int(item["index"]) for item in affected_rounds)
+        artifact_paths = _round_artifact_paths(
+            project_dir=project_dir,
+            run_id=str(state["run_id"]),
+            affected_rounds=affected_rounds,
+            retained_rounds=retained_rounds,
+        )
+        artifact_paths.update(
+            _state_local_paths(state.get("exports"), project_dir=project_dir)
+        )
+        artifact_paths.update(
+            _state_local_paths(state.get("corpus_analysis"), project_dir=project_dir)
+        )
+        artifact_paths.update(
+            {
+                project_dir / "exports" / str(state["run_id"]),
+                project_dir / "analysis" / str(state["run_id"]),
+            }
+        )
+
+        state["rounds"] = retained_rounds
+        _update_prompt_state_after_round_deletion(
+            state,
+            affected_indices=set(affected_indices),
+        )
+        _invalidate_derived_outputs(state)
+        _rebuild_cumulative_audit(project_dir, state)
+
+        latest_round = retained_rounds[-1]
+        latest_status = str(latest_round.get("status") or "")
+        if latest_status == "converged":
+            state["status"] = "converged"
+        elif latest_round.get("files", {}).get("audit"):
+            state["status"] = "awaiting_manual_review"
+        elif latest_round.get("files", {}).get("enriched"):
+            state["status"] = "awaiting_ai_or_review"
+        elif latest_status in {"failed", "cancelled"}:
+            state["status"] = latest_status
+        else:
+            state["status"] = "awaiting_ai_or_review"
+
+        now = _now()
+        state["progress"] = {
+            "operation": "Round history rollback",
+            "heading": "Updating snowball round history",
+            "status": "completed",
+            "stages": ["Delete snowball rounds"],
+            "stage": "Round deletion complete",
+            "message": (
+                f"Deleted snowball round {round_index} and "
+                f"{max(len(affected_indices) - 1, 0)} later dependent round(s)."
+            ),
+            "completed": 1,
+            "total": 1,
+            "current": "",
+            "paper_count": _round_paper_count(latest_round),
+            "started_at": now,
+            "updated_at": now,
+        }
+        deletion_record = {
+            "deleted_at": now,
+            "first_round": int(round_index),
+            "deleted_rounds": affected_indices,
+            "restored_to_round": int(latest_round.get("index", 0)),
+            "backup_path": str(backup.path),
+            "backup_file_count": backup.file_count,
+            "artifact_files_removed": 0,
+            "cleanup_failures": [],
+        }
+        state.setdefault("round_deletions", []).append(deletion_record)
+        self._save_state(project_slug, state)
+
+        removed_count, cleanup_failures = _remove_local_artifacts(
+            artifact_paths,
+            project_dir=project_dir,
+        )
+        deletion_record["artifact_files_removed"] = removed_count
+        deletion_record["cleanup_failures"] = cleanup_failures
+        self._save_state(project_slug, state)
+        return {
+            "run_id": state["run_id"],
+            "deleted_rounds": affected_indices,
+            "latest_round": int(latest_round.get("index", 0)),
+            "backup_path": backup.path,
+            "backup_file_count": backup.file_count,
+            "artifact_files_removed": removed_count,
+            "cleanup_failures": cleanup_failures,
+        }
+
     def analyze_final_corpus(
         self,
         project_slug: str,
@@ -3135,12 +3276,24 @@ class PipelineService:
         state["updated_at"] = _now()
         state_path = self._state_path(project_slug, state["run_id"])
         _write_json(state_path, state)
-        _write_json(state_path.with_name("flow_summary.json"), flow_summary_payload(state))
-        state_path.with_name("flow_diagram.svg").write_text(
-            build_flow_svg(state),
-            encoding="utf-8",
-        )
-        _write_run_log(state_path, state)
+        try:
+            _write_json(state_path.with_name("flow_summary.json"), flow_summary_payload(state))
+        except OSError as exc:
+            LOGGER.warning("Could not refresh flow_summary.json: %s", exc)
+        try:
+            _write_text_atomic(
+                state_path.with_name("flow_diagram.svg"),
+                build_flow_svg(state),
+            )
+        except OSError as exc:
+            LOGGER.warning("Could not refresh flow_diagram.svg: %s", exc)
+        try:
+            _write_run_log(state_path, state)
+        except OSError as exc:
+            LOGGER.warning(
+                "Could not refresh run_log.json; the state checkpoint remains valid: %s",
+                exc,
+            )
 
     def _begin_progress(
         self,
@@ -3737,6 +3890,222 @@ def _apply_audit_summary(
     )
 
 
+def _round_artifact_paths(
+    *,
+    project_dir: Path,
+    run_id: str,
+    affected_rounds: list[dict[str, Any]],
+    retained_rounds: list[dict[str, Any]],
+) -> set[Path]:
+    retained_paths: set[Path] = set()
+    for round_state in retained_rounds:
+        retained_paths.update(
+            _state_local_paths(round_state.get("files"), project_dir=project_dir)
+        )
+        retained_paths.update(
+            _state_local_paths(round_state.get("checkpoint_files"), project_dir=project_dir)
+        )
+
+    paths: set[Path] = set()
+    affected_indices = {int(item.get("index", -1)) for item in affected_rounds}
+    for round_state in affected_rounds:
+        paths.update(_state_local_paths(round_state.get("files"), project_dir=project_dir))
+        paths.update(
+            _state_local_paths(round_state.get("checkpoint_files"), project_dir=project_dir)
+        )
+
+    roots = [
+        project_dir / "runs" / run_id / "processed",
+        project_dir / "audits" / run_id,
+        project_dir / "seeds",
+    ]
+    for root in roots:
+        if not root.exists():
+            continue
+        for candidate in root.iterdir():
+            if any(_path_name_matches_round(candidate.name, index) for index in affected_indices):
+                paths.add(candidate.resolve())
+
+    manual_root = project_dir / "runs" / run_id / "manual_enrichment"
+    for index in affected_indices:
+        paths.add((manual_root / f"round_{index}").resolve())
+
+    return {
+        path
+        for path in paths
+        if not any(
+            path == retained
+            or path.is_relative_to(retained)
+            or retained.is_relative_to(path)
+            for retained in retained_paths
+        )
+    }
+
+
+def _state_local_paths(value: Any, *, project_dir: Path) -> set[Path]:
+    if isinstance(value, dict):
+        return {
+            path
+            for nested in value.values()
+            for path in _state_local_paths(nested, project_dir=project_dir)
+        }
+    if isinstance(value, (list, tuple, set)):
+        return {
+            path
+            for nested in value
+            for path in _state_local_paths(nested, project_dir=project_dir)
+        }
+    if not isinstance(value, (str, Path)):
+        return set()
+    raw = str(value).strip()
+    if not raw:
+        return set()
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        if "/" not in raw and "\\" not in raw:
+            return set()
+        candidate = project_dir / candidate
+    root = project_dir.resolve()
+    resolved = candidate.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        return set()
+    return {resolved}
+
+
+def _path_name_matches_round(name: str, round_index: int) -> bool:
+    return bool(
+        re.search(
+            rf"(?:^|[^0-9A-Za-z])round[_-]?{int(round_index)}(?=$|[^0-9])",
+            name,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _rebuild_cumulative_audit(project_dir: Path, state: dict[str, Any]) -> None:
+    audit_dir = project_dir / "audits" / str(state["run_id"])
+    cumulative_path = audit_dir / "cumulative.csv"
+    included_path = audit_dir / "included.csv"
+    audit_paths = _audit_paths(state)
+    if audit_paths:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        build_cumulative_audit(audit_paths, cumulative_path, included_path)
+        return
+    cumulative_path.unlink(missing_ok=True)
+    included_path.unlink(missing_ok=True)
+
+
+def _update_prompt_state_after_round_deletion(
+    state: dict[str, Any],
+    *,
+    affected_indices: set[int],
+) -> None:
+    refinement = state.get("prompt_refinement")
+    if not isinstance(refinement, dict):
+        refinement = {}
+
+    source_rounds: set[int] = set()
+    raw_sources = refinement.get("source_rounds")
+    if isinstance(raw_sources, list):
+        for value in raw_sources:
+            try:
+                source_rounds.add(int(value))
+            except (TypeError, ValueError):
+                continue
+    try:
+        source_rounds.add(int(refinement.get("source_round")))
+    except (TypeError, ValueError):
+        pass
+    if source_rounds & affected_indices:
+        refinement.update(
+            {
+                "source_data_stale": True,
+                "source_data_stale_at": _now(),
+                "source_data_stale_reason": "A source audit round was deleted.",
+            }
+        )
+        if refinement.get("status") == "proposed":
+            refinement["status"] = "stale"
+
+    replay = state.get("prompt_replay")
+    if not isinstance(replay, dict):
+        return
+    try:
+        replay_round = int(replay.get("replay_round"))
+    except (TypeError, ValueError):
+        return
+    if replay_round not in affected_indices:
+        return
+
+    approved_path = str(
+        refinement.get("approved_prompt_path")
+        or replay.get("approved_prompt_path")
+        or ""
+    )
+    replay_status = "pending" if approved_path and Path(approved_path).exists() else "not_available"
+    replay.clear()
+    replay.update(
+        {
+            "status": replay_status,
+            "refinement_id": refinement.get("refinement_id", ""),
+            "approved_prompt_path": approved_path,
+            "approved_at": refinement.get("approved_at", ""),
+        }
+    )
+    if refinement:
+        refinement["replay_status"] = replay_status
+        for key in (
+            "replay_round",
+            "replayed_at",
+            "replayed",
+            "recovered",
+            "reexcluded",
+            "failed",
+            "replay_source_exclusions",
+            "replay_reviewed_removed",
+            "replay_eligible",
+            "replay_files",
+        ):
+            refinement.pop(key, None)
+
+
+def _remove_local_artifacts(
+    paths: set[Path],
+    *,
+    project_dir: Path,
+) -> tuple[int, list[str]]:
+    root = project_dir.resolve()
+    safe_paths = sorted(
+        {
+            path.resolve()
+            for path in paths
+            if path.resolve() != root and path.resolve().is_relative_to(root)
+        },
+        key=lambda path: len(path.parts),
+    )
+    top_level_paths: list[Path] = []
+    for path in safe_paths:
+        if any(path.is_relative_to(parent) for parent in top_level_paths):
+            continue
+        top_level_paths.append(path)
+
+    removed_count = 0
+    failures: list[str] = []
+    for path in top_level_paths:
+        if not path.exists() and not path.is_symlink():
+            continue
+        try:
+            if path.is_dir() and not path.is_symlink():
+                removed_count += sum(1 for item in path.rglob("*") if item.is_file())
+                rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+                removed_count += 1
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    return removed_count, failures
+
+
 def _invalidate_derived_outputs(state: dict[str, Any]) -> None:
     state.pop("exports", None)
     state.pop("corpus_analysis", None)
@@ -3953,12 +4322,17 @@ def _counted_item_progress(
     state: dict[str, Any],
     stage: str,
     message: str,
+    *,
+    paper_count_baseline: int = 0,
 ) -> Callable[[int, int, str, int], None] | None:
     if callback is None:
         return None
 
     def update(completed: int, total: int, current: str, paper_count: int) -> None:
-        _set_progress_paper_count(state, paper_count)
+        _set_progress_paper_count(
+            state,
+            max(int(paper_count) - max(int(paper_count_baseline), 0), 0),
+        )
         _notify(callback, stage, message, completed, total, current)
 
     return update
@@ -4053,6 +4427,18 @@ def _csv_row_count(path: Path) -> int:
     return len(read_csv(path)[1])
 
 
+def _csv_unique_paper_count(path: Path) -> int:
+    _, rows = read_csv(path)
+    seen: set[str] = set()
+    count = 0
+    for row in rows:
+        keys = paper_keys(row)
+        is_new = not bool(keys & seen)
+        seen.update(keys)
+        count += int(is_new)
+    return count
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -4130,17 +4516,67 @@ def _write_run_log(state_path: Path, state: dict[str, Any]) -> None:
             "events": events,
             "state": state,
         },
+        replace_retry_delays=(0.05, 0.1, 0.2),
     )
 
 
-def _write_json(path: Path, value: dict[str, Any]) -> None:
+def _write_json(
+    path: Path,
+    value: dict[str, Any],
+    *,
+    replace_retry_delays: tuple[float, ...] = FILE_REPLACE_RETRY_DELAYS,
+) -> None:
+    _write_text_atomic(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2),
+        replace_retry_delays=replace_retry_delays,
+    )
+
+
+def _write_text_atomic(
+    path: Path,
+    value: str,
+    *,
+    replace_retry_delays: tuple[float, ...] = FILE_REPLACE_RETRY_DELAYS,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.{os.getpid()}.{get_ident()}.tmp")
-    temporary_path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary_path.replace(path)
+    temporary_path.write_text(value, encoding="utf-8")
+    try:
+        _replace_with_retry(
+            temporary_path,
+            path,
+            retry_delays=replace_retry_delays,
+        )
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _replace_with_retry(
+    temporary_path: Path,
+    destination_path: Path,
+    *,
+    retry_delays: tuple[float, ...],
+) -> None:
+    for delay in (*retry_delays, None):
+        try:
+            os.replace(temporary_path, destination_path)
+            return
+        except OSError as exc:
+            if delay is None or not _is_retryable_replace_error(exc):
+                raise
+            sleep(delay)
+
+
+def _is_retryable_replace_error(exc: OSError) -> bool:
+    return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {
+        5,
+        32,
+        33,
+    }
 
 
 def _build_final_report(

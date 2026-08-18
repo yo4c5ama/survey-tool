@@ -22,6 +22,7 @@ from vnn_survey.enrichment import title_similarity
 from vnn_survey.manual_audit import is_manually_excluded
 from vnn_survey.models import normalize_title
 
+# The final argument is the total number of unique papers in the output pool.
 SnowballProgressCallback = Callable[[int, int, str, int], None]
 
 
